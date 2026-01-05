@@ -1,0 +1,87 @@
+experiment:
+  project: "cpdp_thesis"
+  seed: 2026
+  output_dir: "experiments"
+  run_name: "default"
+  save_best: true
+  device: "cuda"
+
+data:
+  train_jsonl: "src/data/train.jsonl"
+  valid_jsonl: "src/data/valid.jsonl"
+  test_jsonl:  "src/data/test.jsonl"
+  label_key: "target"          # 缺陷标签字段
+  domain_key: "domain"         # 域标签字段：0=source, 1=target（建议固定）
+  num_workers: 4
+  prefetch_factor: 2
+
+model:
+  encoder:
+    name: "codebert"
+    pretrained_path: "CodeBERT"     # 本地路径或 HF id
+    max_length: 224
+    pooling: "cls"                  # "cls" | "mean"
+    freeze_n_layers: 0
+
+  lora:
+    enable: true
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: ["query", "value"]  # 或 ["q_proj","v_proj"]，你实现时统一
+
+  ast:
+    enable: false
+    dim: 128
+    fusion: "concat"                # "concat" | "sum"
+
+  feature_split:
+    enable: true
+    shared_dim: 256
+    private_dim: 256
+    clf_input: "concat"             # "shared" | "private" | "concat"
+
+  classifier:
+    num_classes: 2
+    loss_type: "am_softmax"         # "ce" | "am_softmax"
+    am_softmax:
+      margin: 0.35
+      scale: 30.0
+
+  dann:
+    enable: true
+    weight: 0.1
+    grl:
+      lambda_max: 0.5
+      warmup_epochs: 3
+      schedule: "linear"            # "linear" | "constant"
+    disc:
+      hidden_dim: 128
+      dropout: 0.1
+
+  ortho:
+    enable: true
+    weight: 0.1
+    mode: "corr"                    # "corr" | "cos"
+
+train:
+  epochs: 30
+  batch_size: 16
+  lr: 2.0e-5
+  weight_decay: 0.01
+  grad_accum_steps: 16
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  label_smoothing: 0.0
+  early_stopping:
+    enable: true
+    patience: 12
+    metric: "auc"                   # "auc" | "mcc" | "f1"
+  eval_every_epochs: 1
+
+logging:
+  log_every_steps: 50
+  results_csv: "experiments/results.csv"
+  save_predictions: true
+  save_embeddings: false

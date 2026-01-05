@@ -1,0 +1,48 @@
+# configs/ablations.yaml
+
+groups:
+  Proposed:
+    experiment:
+      run_name: "Proposed"
+    model:
+      ast: { enable: true }
+      lora: { enable: true }
+      classifier: { loss_type: "am_softmax" }
+      ortho: { enable: true, weight: 0.1 }
+      dann:  { enable: true, weight: 0.1 }
+
+  wo_Ortho:
+    experiment:
+      run_name: "wo_Ortho"
+    model:
+      ortho: { enable: false, weight: 0.0 }
+
+  wo_DANN:
+    experiment:
+      run_name: "wo_DANN"
+    model:
+      dann: { enable: false, weight: 0.0 }
+
+  wo_AST:
+    experiment:
+      run_name: "wo_AST"
+    model:
+      ast: { enable: false }
+
+  wo_AMSoftmax:
+    experiment:
+      run_name: "wo_AMSoftmax"
+    model:
+      classifier: { loss_type: "ce" }
+
+  wo_LoRA:
+    experiment:
+      run_name: "wo_LoRA"
+    model:
+      lora: { enable: false }
+  no_dann:
+    model:
+      use_dann: false
+  high_lr:
+    train:
+      lr: 1e-3
