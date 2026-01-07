@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Union
 
 
 class ClassifierHead(nn.Module):
@@ -81,10 +82,11 @@ class ClassifierHead(nn.Module):
             if self.fc.bias is not None:
                 nn.init.zeros_(self.fc.bias)
 
-    def forward(self, x: torch.FloatTensor, labels: torch.Tensor | None = None):
+    def forward(self, x: torch.FloatTensor, labels: Union[torch.Tensor, None] = None):
         """
         Args:
             x: [Batch, in_dim]
+            labels: [Batch] 训练时的标签张量，推理时为 None
 
         Returns:
             if loss_type == "ce":
