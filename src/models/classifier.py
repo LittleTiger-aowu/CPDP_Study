@@ -81,7 +81,7 @@ class ClassifierHead(nn.Module):
             if self.fc.bias is not None:
                 nn.init.zeros_(self.fc.bias)
 
-    def forward(self, x: torch.FloatTensor):
+    def forward(self, x: torch.FloatTensor, labels: torch.Tensor | None = None):
         """
         Args:
             x: [Batch, in_dim]
@@ -124,11 +124,23 @@ class ClassifierHead(nn.Module):
             # 此时不做 margin，margin 在 loss 计算时基于 label 施加
             scaled_cosine = cos_theta * self.am_s
 
-            # [Fix 1] 返回 Tuple，且使用 clone() 隔离对象
-            # logits: 用于推理和 Acc 计算 (不含 margin)
-            # am_logits: 用于 Loss 计算 (后续会在 train_step 中做 in-place margin 减法)
-            # 显式 clone 确保 am_logits 是独立内存，防止污染 logits
-            return scaled_cosine, scaled_cosine.clone()
+            # logits: 推理/统计使用 (不含 margin)
+            # am_logits: 训练损失使用 (可加 margin)
+            am_logits = scaled_cosine.clone()
+
+            if self.training and labels is not None:
+                if labels.dim() != 1:
+                    raise ValueError(f"labels must be 1D [B], got {labels.shape}")
+                if labels.size(0) != am_logits.size(0):
+                    raise ValueError(
+                        f"labels batch mismatch: {labels.size(0)} vs {am_logits.size(0)}"
+                    )
+
+                one_hot = torch.zeros_like(am_logits)
+                one_hot.scatter_(1, labels.view(-1, 1), 1.0)
+                am_logits = am_logits - one_hot * (self.am_m * self.am_s)
+
+            return scaled_cosine, am_logits
 
         else:
             # ------------------------------------------------
