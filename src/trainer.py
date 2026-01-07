@@ -58,17 +58,6 @@ def _move_batch(batch: Dict, device: torch.device) -> Dict:
     return moved
 
 
-def _apply_am_softmax_margin(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    margin: float,
-    scale: float,
-) -> torch.Tensor:
-    one_hot = torch.zeros_like(logits)
-    one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-    return logits - one_hot * (margin * scale)
-
-
 def train_one_epoch(
     model: nn.Module,
     source_loader: DataLoader,
@@ -109,13 +98,7 @@ def train_one_epoch(
         logits = src_out["logits"]
 
         if "am_logits" in src_out:
-            am_logits = _apply_am_softmax_margin(
-                src_out["am_logits"],
-                src_labels,
-                margin=model.classifier.am_m,
-                scale=model.classifier.am_s,
-            )
-            loss_cls = criterion_cls(am_logits, src_labels)
+            loss_cls = criterion_cls(src_out["am_logits"], src_labels)
         else:
             loss_cls = criterion_cls(logits, src_labels)
 
