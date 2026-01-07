@@ -27,6 +27,11 @@ class CPDPDataset(Dataset):
             max_length: int = 224,
             label_key: str = "target",
             domain_key: str = "domain",
+            code_key: str = "code",
+            code_key_fallbacks: Optional[List[str]] = None,
+            domain_key_fallbacks: Optional[List[str]] = None,
+            domain_map: Optional[Dict[str, int]] = None,
+            default_domain_value: Optional[int] = None,
             use_ast: bool = True,
             strict_graph_check: bool = True,
             in_memory: bool = True,
@@ -38,6 +43,11 @@ class CPDPDataset(Dataset):
             max_length: 文本截断长度.
             label_key: 缺陷标签键名 (JSONL中的key).
             domain_key: 域标签键名 (JSONL中的key).
+            code_key: 源代码键名 (JSONL中的key).
+            code_key_fallbacks: 源代码备用键名列表.
+            domain_key_fallbacks: 域标签备用键名列表.
+            domain_map: 域标签字符串映射表 (例如 {"FFmpeg": 0, "QEMU": 1}).
+            default_domain_value: 当 domain_key 不存在时使用的默认域标签.
             use_ast: 是否处理 AST 数据.
             strict_graph_check: 是否对 AST 边索引做越界检查.
             in_memory: 是否一次性加载到内存 (建议 True 以加速).
@@ -47,6 +57,12 @@ class CPDPDataset(Dataset):
         self.max_length = max_length
         self.label_key = label_key
         self.domain_key = domain_key
+        fallback_code_keys = code_key_fallbacks or ["func"]
+        self.code_keys = [code_key] + [k for k in fallback_code_keys if k != code_key]
+        fallback_domain_keys = domain_key_fallbacks or []
+        self.domain_keys = [domain_key] + [k for k in fallback_domain_keys if k != domain_key]
+        self.domain_map = domain_map or {}
+        self.default_domain_value = default_domain_value
         self.use_ast = use_ast
         self.strict_graph_check = strict_graph_check
 
@@ -68,6 +84,47 @@ class CPDPDataset(Dataset):
             raise ValueError(f"Invalid JSONL format in {data_path}: {e}")
 
         logger.info(f"Loaded {len(self.data)} samples.")
+
+    def _get_code_text(self, item: Dict[str, Any]) -> str:
+        for key in self.code_keys:
+            if key in item:
+                value = item.get(key, "")
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    return value
+                return str(value)
+        return ""
+
+    def _get_domain_value(self, item: Dict[str, Any]) -> int:
+        raw_value = None
+        for key in self.domain_keys:
+            if key in item:
+                raw_value = item.get(key)
+                break
+
+        if raw_value is None:
+            if self.default_domain_value is not None:
+                return int(self.default_domain_value)
+            return 0
+
+        if isinstance(raw_value, bool):
+            return int(raw_value)
+        if isinstance(raw_value, (int, float)):
+            return int(raw_value)
+        if isinstance(raw_value, str):
+            if raw_value.isdigit() or (raw_value.startswith("-") and raw_value[1:].isdigit()):
+                return int(raw_value)
+            if raw_value in self.domain_map:
+                return int(self.domain_map[raw_value])
+            logger.warning(
+                "Domain value '%s' could not be mapped. Using default (%s).",
+                raw_value,
+                self.default_domain_value if self.default_domain_value is not None else 0,
+            )
+            return int(self.default_domain_value) if self.default_domain_value is not None else 0
+
+        return int(self.default_domain_value) if self.default_domain_value is not None else 0
 
     def __len__(self) -> int:
         return len(self.data)
@@ -127,7 +184,7 @@ class CPDPDataset(Dataset):
         # -------------------------
         # 1. 文本处理 (Tokenization)
         # -------------------------
-        code_text = item.get("code", "")
+        code_text = self._get_code_text(item)
         # Tokenizer 调用: 不做 batch padding (padding=False)，由 collate 负责
         encoding = self.tokenizer(
             code_text,
@@ -142,7 +199,7 @@ class CPDPDataset(Dataset):
             "attention_mask": torch.tensor(encoding["attention_mask"], dtype=torch.long),
             # 标签数据 (默认处理为标量，collate 会 stack)
             self.label_key: int(item.get(self.label_key, 0)),
-            self.domain_key: int(item.get(self.domain_key, 0))
+            self.domain_key: self._get_domain_value(item)
         }
 
         # 兼容 RoBERTa (没有 token_type_ids) 和 BERT (有)

@@ -1,242 +1,258 @@
 import argparse
 import json
 import os
-import torch
-import hashlib
-from tqdm import tqdm
 from pathlib import Path
 from collections import Counter
+
+from tqdm import tqdm
+import torch
 from tree_sitter import Language, Parser
 
 
 # ==========================================
-# 1. 核心处理逻辑
+# 1. AST 解析核心逻辑 (无状态)
 # ==========================================
 
-class ASTCacheBuilder:
-    def __init__(self, args):
-        self.args = args
-        self.out_dir = Path(args.out_dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+def parse_code_to_graph(code_bytes, parser):
+    """
+    解析代码字节流，返回节点类型列表和边列表 (Parent->Child)。
 
-        # 初始化 Parser
-        self.parser = Parser()
-        try:
-            # 加载 .so 库
-            lang = Language(args.lib_path, args.language)
-            self.parser.set_language(lang)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load tree-sitter language from {args.lib_path}. Error: {e}")
+    Returns:
+        node_types: List[str]
+        edges: List[Tuple[int, int]] (source, target)
+    """
+    try:
+        tree = parser.parse(code_bytes)
+        root_node = tree.root_node
 
-        self.vocab = {}
-        self.vocab_path = Path(args.vocab_path) if args.vocab_path else self.out_dir / "vocab.json"
+        if root_node.byte_size == 0 or len(root_node.children) == 0:
+            return [], []
 
-    def _get_ast_sequence(self, source_code_bytes):
-        """
-        解析源码，返回 (node_types, edges)
-        edges: List[Tuple[parent_idx, child_idx]] (严格 Parent->Child)
-        """
-        tree = self.parser.parse(source_code_bytes)
-        root = tree.root_node
-
-        stack = [(root, -1)]
-        node_types_list = []
-        edges_list = []
-        curr_idx = 0
+        node_types = []
+        edges = []
+        stack = [(root_node, -1)]
 
         while stack:
-            node, parent_idx = stack.pop()
-
-            node_types_list.append(node.type)
+            curr_node, parent_idx = stack.pop()
+            curr_idx = len(node_types)
+            node_types.append(curr_node.type)
 
             if parent_idx != -1:
-                edges_list.append((parent_idx, curr_idx))
+                edges.append((parent_idx, curr_idx))
 
-            # 倒序压栈，确保 DFS 顺序
-            for child in reversed(node.children):
+            for child in reversed(curr_node.children):
                 stack.append((child, curr_idx))
 
-            curr_idx += 1
+        return node_types, edges
 
-        return node_types_list, edges_list
+    except Exception as e:
+        raise RuntimeError(f"Tree-sitter parse error: {str(e)}")
 
-    def build_vocab(self):
-        """
-        第一遍扫描：构建全局 node_type 词表
-        [Fix 1] 明确使用字典序排序，保证跨平台/多次运行的绝对确定性。
-        """
-        print(f"[Pass 1] Scanning for vocab from {self.args.jsonl_path}...")
-        counter = Counter()
 
-        # [Fix 2] 流式读取，避免一次性加载
-        with open(self.args.jsonl_path, 'r', encoding='utf-8') as f:
-            for line_idx, line in enumerate(tqdm(f, desc="Building Vocab")):
-                # 处理 max_samples
-                if self.args.max_samples > 0 and line_idx >= self.args.max_samples:
-                    break
+# ==========================================
+# 2. 工具函数
+# ==========================================
 
-                if not line.strip(): continue
-                try:
-                    item = json.loads(line)
-                    code = item.get('func', "")
-                    if not code: continue
+def sanitize_filename(s):
+    """清理文件名中的非法字符"""
+    return "".join([c if c.isalnum() or c in ("_", "-") else "_" for c in str(s)])
 
-                    tree = self.parser.parse(bytes(code, "utf8"))
-                    cursor = tree.walk()
 
-                    # 高效遍历
-                    visited_children = False
-                    while True:
-                        if not visited_children:
-                            counter[cursor.node.type] += 1
-                        if cursor.goto_first_child():
-                            visited_children = False
-                        elif cursor.goto_next_sibling():
-                            visited_children = False
-                        elif cursor.goto_parent():
-                            visited_children = True
-                        else:
-                            break
-                except Exception:
+def get_parser(lib_path, language_name):
+    if not os.path.exists(lib_path):
+        raise FileNotFoundError(f"Language library not found: {lib_path}")
+
+    lang = Language(lib_path, language_name)
+    parser = Parser()
+    parser.set_language(lang)
+    return parser
+
+
+# ==========================================
+# 3. Pass 1: 构建 Vocab
+# ==========================================
+
+def build_vocab(args, parser):
+    print("==> [Pass 1] Scanning for vocabulary...")
+    type_counter = Counter()
+
+    with open(args.jsonl_path, "r", encoding="utf-8") as f:
+        iterator = tqdm(f, desc="Building Vocab", unit="lines")
+        for i, line in enumerate(iterator):
+            if args.max_samples and i >= args.max_samples:
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+                code = item.get("func", "")
+                if not code:
                     continue
 
-                    # [Fix 1] 强制字典序排序 (Alphabetical Sort)
-        sorted_types = sorted(counter.keys())
-        self.vocab = {t: i + 1 for i, t in enumerate(sorted_types)}
-        self.vocab["<unk>"] = 0
+                node_types, _ = parse_code_to_graph(code.encode("utf-8"), parser)
+                type_counter.update(node_types)
 
-        with open(self.vocab_path, 'w', encoding='utf-8') as f:
-            json.dump(self.vocab, f, indent=2)
-        print(f"[Pass 1] Vocab saved to {self.vocab_path}, size: {len(self.vocab)} (Sorted Alphabetically)")
+            except json.JSONDecodeError:
+                continue
+            except Exception:
+                continue
 
-    def build_cache(self):
-        """第二遍扫描：生成并保存 Tensor Cache"""
-        if not self.vocab:
-            if self.vocab_path.exists():
-                with open(self.vocab_path, 'r') as f:
-                    self.vocab = json.load(f)
-                print(f"[Pass 2] Loaded existing vocab, size: {len(self.vocab)}")
-            else:
-                raise FileNotFoundError("Vocab not found. Run with vocab building first.")
+    sorted_types = sorted(type_counter.keys(), key=lambda k: (-type_counter[k], k))
+    vocab = {t: idx for idx, t in enumerate(sorted_types)}
 
-        print(f"[Pass 2] Generating AST cache to {self.out_dir}...")
+    vocab_path = Path(args.vocab_path)
+    vocab_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        json.dump(vocab, f, indent=2)
 
-        bad_cases_path = self.out_dir / "bad_cases.jsonl"
-        bad_file = open(bad_cases_path, 'w', encoding='utf-8')
+    print(f"==> Vocab saved to {vocab_path} (Size: {len(vocab)})")
+    return vocab
 
-        success_count = 0
-        fail_count = 0
 
-        # [Fix 2] 流式读取
-        with open(self.args.jsonl_path, 'r', encoding='utf-8') as f:
-            iterator = tqdm(f, desc="Processing")
+# ==========================================
+# 4. Pass 2: 生成 Cache
+# ==========================================
 
-            for line_idx, line in enumerate(iterator):
-                if self.args.max_samples > 0 and line_idx >= self.args.max_samples:
-                    break
+def build_cache(args, parser, vocab):
+    print("==> [Pass 2] Generating AST cache...")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-                if not line.strip(): continue
+    bad_cases_path = out_dir / "bad_cases.jsonl"
+    bad_cases_file = open(bad_cases_path, "w", encoding="utf-8")
+
+    success_count = 0
+    fail_count = 0
+    skip_count = 0
+
+    with open(args.jsonl_path, "r", encoding="utf-8") as f:
+        iterator = tqdm(f, desc="Generating Cache", unit="samples")
+
+        for i, line in enumerate(iterator):
+            if args.max_samples and i >= args.max_samples:
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+                project = item.get("project", "unknown")
+                commit_id = item.get("commit_id", "unknown")
+                idx = item.get("idx", i)
+                func_code = item.get("func", "")
+            except json.JSONDecodeError:
+                bad_cases_file.write(json.dumps({"line": i, "error": "JSONDecodeError"}) + "\n")
+                fail_count += 1
+                continue
+
+            safe_proj = sanitize_filename(project)
+            safe_commit = sanitize_filename(commit_id)
+            safe_idx = sanitize_filename(idx)
+            filename = f"{safe_proj}__{safe_commit}__{safe_idx}.pt"
+            save_path = out_dir / filename
+
+            if save_path.exists() and not args.overwrite:
+                skip_count += 1
+                continue
+
+            try:
+                node_types, edges = parse_code_to_graph(func_code.encode("utf-8"), parser)
 
                 try:
-                    item = json.loads(line)
-                    code = item.get('func', "")
-                    if not code: raise ValueError("Empty code")
+                    x_ids = [vocab[t] for t in node_types]
+                except KeyError as e:
+                    raise ValueError(f"Unknown node type found in Pass 2: {e}")
 
-                    # [Fix 3] 增强 Key 唯一性：加入内容 Hash
-                    # 格式: {project}__{commit}__{idx}_{hash8}.pt
-                    # 这样即使 idx 在不同版本数据中发生碰撞，Hash 也能保证唯一性
-                    # Dataset 端加载时也需同样计算 hash，或者 Dataset 直接读文件名列表
-                    # (此处假设 Dataset 能够根据 code 内容复现此 Key，或这是离线预处理一次性生成)
-                    code_hash = hashlib.md5(code.encode('utf-8')).hexdigest()[:8]
-
-                    # 优先使用 item['idx']，如果没有则用 line_idx，最后挂上 hash 双保险
-                    idx_val = item.get('idx', line_idx)
-                    file_key = f"{item.get('project', 'unk')}__{item.get('commit_id', 'unk')}__{idx_val}_{code_hash}"
-
-                    save_path = self.out_dir / f"{file_key}.pt"
-
-                    if not self.args.overwrite and save_path.exists():
-                        continue
-
-                    # 1. 提取结构
-                    node_types_str, edges = self._get_ast_sequence(bytes(code, "utf8"))
-
-                    # 2. Tensor 化
-                    node_ids = [self.vocab.get(t, 0) for t in node_types_str]
-                    ast_x = torch.tensor(node_ids, dtype=torch.long)
-
+                if len(x_ids) == 0:
+                    ast_x = torch.tensor([], dtype=torch.long)
+                    ast_edge_index = torch.empty((2, 0), dtype=torch.long)
+                else:
+                    ast_x = torch.tensor(x_ids, dtype=torch.long)
                     if len(edges) > 0:
-                        # 转置为 [2, E]
-                        edge_tensor = torch.tensor(edges, dtype=torch.long).t().contiguous()
+                        ast_edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
                     else:
-                        edge_tensor = torch.zeros((2, 0), dtype=torch.long)
+                        ast_edge_index = torch.empty((2, 0), dtype=torch.long)
 
-                    # 3. 构造 Cache 对象
-                    data = {
-                        "ast_x": ast_x,
-                        "ast_edge_index": edge_tensor,
-                        "meta": {
-                            "project": item.get('project'),
-                            "idx": idx_val,
-                            "hash": code_hash,
-                            "nodes_count": len(node_ids)
-                        }
+                payload = {
+                    "ast_x": ast_x,
+                    "ast_edge_index": ast_edge_index,
+                    "meta": {
+                        "project": project,
+                        "commit_id": commit_id,
+                        "idx": idx,
+                    },
+                }
+
+                torch.save(payload, save_path)
+                success_count += 1
+
+            except Exception as e:
+                fail_count += 1
+                error_info = {
+                    "project": project,
+                    "commit_id": commit_id,
+                    "idx": idx,
+                    "error": str(e),
+                }
+                bad_cases_file.write(json.dumps(error_info) + "\n")
+
+                if args.on_error == "skip":
+                    continue
+                if args.on_error == "empty":
+                    payload = {
+                        "ast_x": torch.tensor([], dtype=torch.long),
+                        "ast_edge_index": torch.empty((2, 0), dtype=torch.long),
+                        "meta": {"error": str(e)},
                     }
+                    torch.save(payload, save_path)
 
-                    torch.save(data, save_path)
-                    success_count += 1
-
-                except Exception as e:
-                    fail_count += 1
-                    bad_record = {"line": line_idx, "error": str(e)}
-                    bad_file.write(json.dumps(bad_record) + "\n")
-
-                    if self.args.on_error == "empty":
-                        # 错误时生成带 Hash 的空文件，防止 Dataset 加载 404
-                        # 注意：如果不知道 Hash，Dataset 还是找不到，所以这里其实主要用于 debug
-                        # 生产环境建议 on_error skip
-                        pass
-
-        bad_file.close()
-        print(f"Done. Success: {success_count}, Failed: {fail_count}. Bad cases: {bad_cases_path}")
+    bad_cases_file.close()
+    print(f"==> Done. Success: {success_count}, Failed: {fail_count}, Skipped: {skip_count}")
+    print(f"==> Bad cases saved to {bad_cases_path}")
 
 
 # ==========================================
-# 2. CLI 入口
+# 5. Main Entry
 # ==========================================
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build Offline AST Cache (Route B)")
-
-    parser.add_argument("--jsonl_path", type=str, required=True)
-    parser.add_argument("--out_dir", type=str, required=True)
-    parser.add_argument("--lib_path", type=str, required=True)
-
-    parser.add_argument("--language", type=str, default="c")
-    parser.add_argument("--vocab_path", type=str, default="")
-    parser.add_argument("--max_samples", type=int, default=-1)
-    parser.add_argument("--on_error", type=str, choices=["skip", "empty"], default="skip")  # 默认 skip 更安全
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--skip_vocab", action="store_true")
+def main():
+    parser = argparse.ArgumentParser(description="Offline AST Cache Builder")
+    parser.add_argument("--jsonl_path", type=str, required=True, help="Input JSONL file")
+    parser.add_argument("--out_dir", type=str, required=True, help="Output directory for cache")
+    parser.add_argument("--lib_path", type=str, required=True, help="Path to tree-sitter .so file")
+    parser.add_argument("--language", type=str, default="c", help="Language name (e.g., c, java)")
+    parser.add_argument(
+        "--vocab_path",
+        type=str,
+        default=None,
+        help="Path to vocab.json (default: out_dir/vocab.json)",
+    )
+    parser.add_argument("--num_workers", type=int, default=1, help="Num workers (Not implemented for simplicity, use 1)")
+    parser.add_argument("--max_samples", type=int, default=None, help="Debug limit")
+    parser.add_argument("--on_error", type=str, choices=["skip", "empty"], default="skip")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cache files")
 
     args = parser.parse_args()
 
-    builder = ASTCacheBuilder(args)
+    if args.vocab_path is None:
+        args.vocab_path = os.path.join(args.out_dir, "vocab.json")
 
-    if not args.skip_vocab:
-        builder.build_vocab()
+    ts_parser = get_parser(args.lib_path, args.language)
 
-    builder.build_cache()
+    if os.path.exists(args.vocab_path) and not args.overwrite:
+        print(f"==> Loading existing vocab from {args.vocab_path}")
+        with open(args.vocab_path, "r") as f:
+            vocab = json.load(f)
+    else:
+        vocab = build_vocab(args, ts_parser)
 
-# ==========================================
-# 3. 验收测试 (Smoke Test)
-# ==========================================
-# 运行前请取消下方注释
-"""
+    build_cache(args, ts_parser, vocab)
+
+
 if __name__ == "__main__":
-    # 使用方法:
-    # python tools/build_ast_cache.py --jsonl_path ... --lib_path ...
-
-    # 简单的逻辑验证脚本 (需要真实文件路径)
-    pass
-"""
+    main()

@@ -67,8 +67,15 @@ def _check_data_paths(paths: Dict[str, str]) -> bool:
     return ok
 
 
-def _validate_jsonl(path: str, required_keys: Dict[str, str]) -> bool:
+def _validate_jsonl(
+    path: str,
+    required_keys: Dict[str, str],
+    any_of_keys: Dict[str, list[str]] | None = None,
+    optional_keys: Dict[str, str] | None = None,
+) -> bool:
     ok = True
+    any_of_keys = any_of_keys or {}
+    optional_keys = optional_keys or {}
     with open(path, "r", encoding="utf-8") as f:
         for idx, line in enumerate(f, start=1):
             if not line.strip():
@@ -93,6 +100,25 @@ def _validate_jsonl(path: str, required_keys: Dict[str, str]) -> bool:
                         idx,
                     )
                     ok = False
+            for group_name, candidates in any_of_keys.items():
+                if not any(key in obj for key in candidates):
+                    logging.error(
+                        "Missing required key '%s' (any of: %s) in %s line %d.",
+                        group_name,
+                        ", ".join(candidates),
+                        path,
+                        idx,
+                    )
+                    ok = False
+            for key, desc in optional_keys.items():
+                if key not in obj:
+                    logging.debug(
+                        "Optional key '%s' (%s) missing in %s line %d.",
+                        key,
+                        desc,
+                        path,
+                        idx,
+                    )
     return ok
 
 
@@ -142,32 +168,45 @@ def main() -> None:
     cfg["data"]["valid_jsonl"] = data_paths["valid"]
     cfg["data"]["test_jsonl"] = data_paths["test"]
 
-    label_key = cfg.get("data", {}).get("label_key", "target")
-    domain_key = cfg.get("data", {}).get("domain_key", "domain")
+    data_cfg = cfg.get("data", {})
+    label_key = data_cfg.get("label_key", "target")
+    domain_key = data_cfg.get("domain_key", "domain")
+    code_key = data_cfg.get("code_key", "code")
+    code_key_fallbacks = data_cfg.get("code_key_fallbacks", ["func"])
+    domain_key_fallbacks = data_cfg.get("domain_key_fallbacks", [])
+    domain_map = data_cfg.get("domain_map", None)
+    domain_key_required = bool(data_cfg.get("domain_key_required", False))
+    code_keys = [code_key] + [k for k in code_key_fallbacks if k != code_key]
 
     required_sets = {
         "train_source": {
-            "code": "source code string",
             label_key: "defect label",
-            domain_key: "domain label",
         },
         "valid": {
-            "code": "source code string",
             label_key: "defect label",
-            domain_key: "domain label",
         },
         "test": {
-            "code": "source code string",
             label_key: "defect label",
-            domain_key: "domain label",
         },
         "train_target": {
-            "code": "source code string",
-            domain_key: "domain label",
         },
     }
+    any_of_keys = {
+        name: {"code": code_keys}
+        for name in required_sets
+    }
+    optional_domain = {domain_key: "domain label"} if not domain_key_required else {}
+    if domain_key_required:
+        for name in required_sets:
+            required_sets[name][domain_key] = "domain label"
+
     for name, path in data_paths.items():
-        if not _validate_jsonl(path, required_sets[name]):
+        if not _validate_jsonl(
+            path,
+            required_sets[name],
+            any_of_keys=any_of_keys[name],
+            optional_keys=optional_domain,
+        ):
             logging.error("JSONL validation failed for %s (%s).", name, path)
             return
 
@@ -182,6 +221,11 @@ def main() -> None:
         max_length=max_length,
         label_key=label_key,
         domain_key=domain_key,
+        code_key=code_key,
+        code_key_fallbacks=code_key_fallbacks,
+        domain_key_fallbacks=domain_key_fallbacks,
+        domain_map=domain_map,
+        default_domain_value=0,
         use_ast=use_ast,
     )
     train_target_set = CPDPDataset(
@@ -190,6 +234,11 @@ def main() -> None:
         max_length=max_length,
         label_key=label_key,
         domain_key=domain_key,
+        code_key=code_key,
+        code_key_fallbacks=code_key_fallbacks,
+        domain_key_fallbacks=domain_key_fallbacks,
+        domain_map=domain_map,
+        default_domain_value=1,
         use_ast=use_ast,
     )
     valid_set = CPDPDataset(
@@ -198,6 +247,11 @@ def main() -> None:
         max_length=max_length,
         label_key=label_key,
         domain_key=domain_key,
+        code_key=code_key,
+        code_key_fallbacks=code_key_fallbacks,
+        domain_key_fallbacks=domain_key_fallbacks,
+        domain_map=domain_map,
+        default_domain_value=0,
         use_ast=use_ast,
     )
     test_set = CPDPDataset(
@@ -206,6 +260,11 @@ def main() -> None:
         max_length=max_length,
         label_key=label_key,
         domain_key=domain_key,
+        code_key=code_key,
+        code_key_fallbacks=code_key_fallbacks,
+        domain_key_fallbacks=domain_key_fallbacks,
+        domain_map=domain_map,
+        default_domain_value=1,
         use_ast=use_ast,
     )
 
