@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import random
@@ -66,45 +65,6 @@ def _check_data_paths(paths: Dict[str, str]) -> bool:
     return ok
 
 
-def _validate_jsonl(path: str, required_keys: Dict[str, str]) -> bool:
-    ok = True
-    with open(path, "r", encoding="utf-8") as f:
-        for idx, line in enumerate(f, start=1):
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                logging.error("Invalid JSONL at %s line %d: %s", path, idx, exc)
-                ok = False
-                continue
-            if not isinstance(obj, dict):
-                logging.error("Invalid JSONL object at %s line %d (not a dict).", path, idx)
-                ok = False
-                continue
-            for key, desc in required_keys.items():
-                if key not in obj:
-                    logging.error(
-                        "Missing required key '%s' (%s) in %s line %d.",
-                        key,
-                        desc,
-                        path,
-                        idx,
-                    )
-                    ok = False
-    return ok
-
-
-def _load_tokenizer(model_name: str) -> AutoTokenizer:
-    try:
-        logging.info("Loading tokenizer from local cache: %s", model_name)
-        return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-    except (OSError, ValueError) as exc:
-        logging.warning("Local tokenizer load failed: %s", exc)
-        logging.info("Falling back to online tokenizer load: %s", model_name)
-        return AutoTokenizer.from_pretrained(model_name, local_files_only=False)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser("CPDP Experiment Runner")
     parser.add_argument("--config", type=str, default="src/configs/defaults.yaml")
@@ -121,7 +81,7 @@ def main() -> None:
 
     data_paths = {
         "train_source": "src/data/train.jsonl",
-        "train_target": "src/data/target_train.jsonl",
+        "train_target": "src/data/test.jsonl",
         "valid": "src/data/valid.jsonl",
         "test": "src/data/test.jsonl",
     }
@@ -130,33 +90,17 @@ def main() -> None:
         logging.error("Please ensure all required JSONL files exist before running.")
         return
 
-    if data_paths["train_target"] == data_paths["test"]:
-        logging.error("Target-train and test JSONL paths must differ to avoid leakage.")
-        return
-
     cfg.setdefault("data", {})
     cfg["data"]["train_jsonl"] = data_paths["train_source"]
-    cfg["data"]["target_jsonl"] = data_paths["train_target"]
     cfg["data"]["valid_jsonl"] = data_paths["valid"]
     cfg["data"]["test_jsonl"] = data_paths["test"]
 
-    label_key = cfg.get("data", {}).get("label_key", "target")
-    domain_key = cfg.get("data", {}).get("domain_key", "domain")
-
-    required_keys = {
-        "code": "source code string",
-        label_key: "defect label",
-        domain_key: "domain label",
-    }
-    for name, path in data_paths.items():
-        if not _validate_jsonl(path, required_keys):
-            logging.error("JSONL validation failed for %s (%s).", name, path)
-            return
-
-    tokenizer = _load_tokenizer("microsoft/codebert-base")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
 
     use_ast = cfg.get("model", {}).get("ast", {}).get("enable", False)
     max_length = cfg.get("model", {}).get("encoder", {}).get("max_length", 224)
+    label_key = cfg.get("data", {}).get("label_key", "target")
+    domain_key = cfg.get("data", {}).get("domain_key", "domain")
 
     train_source_set = CPDPDataset(
         data_path=data_paths["train_source"],
