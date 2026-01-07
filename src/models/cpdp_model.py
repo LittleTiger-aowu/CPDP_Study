@@ -182,7 +182,7 @@ class CPDPModel(nn.Module):
                     param.requires_grad = False
             logger.info(f"[CPDPModel] Frozen embeddings + {frozen} encoder layers.")
 
-    def forward(self, batch: dict, cfg: dict, epoch_idx: int = None) -> dict:
+    def forward(self, batch: dict, cfg: dict, epoch_idx: int = None, grl_lambda: float | None = None) -> dict:
         """
         Args:
             batch: Data batch (must contain ast_x/ast_edge_index/ast_batch if ast enabled)
@@ -248,7 +248,9 @@ class CPDPModel(nn.Module):
         else:
             clf_in = merged_feat
 
-        cls_out = self.classifier(clf_in)
+        label_key = cfg.get("data", {}).get("label_key", "target") if isinstance(cfg, dict) else "target"
+        labels = batch.get(label_key, None)
+        cls_out = self.classifier(clf_in, labels=labels)
 
         # 拆包处理 (兼容 AM-Softmax 返回 tuple 的情况)
         if isinstance(cls_out, tuple):
@@ -260,8 +262,9 @@ class CPDPModel(nn.Module):
         # 5. 域对抗 (DANN)
         domain_logits = None
         if self.use_dann:
-            # 传入 epoch_idx 以计算 GRL lambda
-            domain_logits = self.domain_disc(h_s, epoch_idx, cfg)
+            if grl_lambda is None:
+                raise ValueError("grl_lambda must be provided when DANN is enabled.")
+            domain_logits = self.domain_disc(h_s, grl_lambda)
 
         # 6. 构建输出 (清洗 None 值防止下游 crash)
         output = {
