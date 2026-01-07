@@ -163,19 +163,13 @@ class CPDPDataset(Dataset):
                    f"Node count={num_nodes}, but edge refs {max_idx}(max)/{min_idx}(min).")
             raise ValueError(msg)
 
-    def _load_ast_from_cache(self, payload: Any) -> Dict[str, torch.Tensor]:
+    def _load_ast_from_cache(self, payload: Any) -> Optional[Dict[str, torch.Tensor]]:
         if not isinstance(payload, dict):
-            return {
-                "ast_x": torch.tensor([], dtype=torch.long),
-                "ast_edge_index": torch.zeros((2, 0), dtype=torch.long),
-            }
+            return None
         ast_x = payload.get("ast_x")
         ast_edge_index = payload.get("ast_edge_index")
         if ast_x is None or ast_edge_index is None:
-            return {
-                "ast_x": torch.tensor([], dtype=torch.long),
-                "ast_edge_index": torch.zeros((2, 0), dtype=torch.long),
-            }
+            return None
 
         if not torch.is_tensor(ast_x):
             ast_x = torch.tensor(ast_x, dtype=torch.long)
@@ -194,7 +188,7 @@ class CPDPDataset(Dataset):
         elif ast_edge_index.dim() == 2 and ast_edge_index.size(1) == 2:
             ast_edge_index = ast_edge_index.t().contiguous()
         else:
-            raise ValueError(f"AST edges format error in cache. Got shape {ast_edge_index.shape}")
+            return None
 
         self._validate_ast_edge_index(ast_edge_index, ast_x.size(0))
         return {"ast_x": ast_x, "ast_edge_index": ast_edge_index}
