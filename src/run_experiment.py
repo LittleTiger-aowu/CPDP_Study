@@ -176,6 +176,8 @@ def main() -> None:
     domain_key_fallbacks = data_cfg.get("domain_key_fallbacks", [])
     domain_map = data_cfg.get("domain_map", None)
     domain_key_required = bool(data_cfg.get("domain_key_required", False))
+    ast_cache_dir = data_cfg.get("ast_cache_dir")
+    ast_cache_fallback_to_jsonl = bool(data_cfg.get("ast_cache_fallback_to_jsonl", True))
     code_keys = [code_key] + [k for k in code_key_fallbacks if k != code_key]
 
     required_sets = {
@@ -227,6 +229,8 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=0,
         use_ast=use_ast,
+        ast_cache_dir=ast_cache_dir,
+        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     train_target_set = CPDPDataset(
         data_path=data_paths["train_target"],
@@ -240,6 +244,8 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=1,
         use_ast=use_ast,
+        ast_cache_dir=ast_cache_dir,
+        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     valid_set = CPDPDataset(
         data_path=data_paths["valid"],
@@ -253,6 +259,8 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=0,
         use_ast=use_ast,
+        ast_cache_dir=ast_cache_dir,
+        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     test_set = CPDPDataset(
         data_path=data_paths["test"],
@@ -266,6 +274,8 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=1,
         use_ast=use_ast,
+        ast_cache_dir=ast_cache_dir,
+        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
 
     collate_cfg = CollateConfig(
