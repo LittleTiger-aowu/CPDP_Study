@@ -10,8 +10,11 @@ data:
   train_jsonl: "src/data/train.jsonl"
   valid_jsonl: "src/data/valid.jsonl"
   test_jsonl:  "src/data/test.jsonl"
+  code_key: "code"            # 源代码字段
+  code_key_fallbacks: ["func"]
   label_key: "target"          # 缺陷标签字段
   domain_key: "domain"         # 域标签字段：0=source, 1=target（建议固定）
+  domain_key_required: false   # 若无 domain 字段，则使用数据集默认值 (source=0, target=1)
   num_workers: 4
   prefetch_factor: 2
 

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import cycle
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, Iterator
 
 import numpy as np
 import torch
@@ -34,21 +33,28 @@ def compute_grl_lambda(epoch_idx: int, cfg: Dict) -> float:
     return lambda_max * progress
 
 
+def _next_batch(loader: DataLoader, iterator: Iterator[Dict]) -> Tuple[Dict, Iterator[Dict]]:
+    try:
+        batch = next(iterator)
+        return batch, iterator
+    except StopIteration:
+        iterator = iter(loader)
+        batch = next(iterator)
+        return batch, iterator
+
+
 def _iter_pairs(
     source_loader: DataLoader,
     target_loader: DataLoader,
 ) -> Iterable[Tuple[Dict, Dict]]:
-    if len(source_loader) >= len(target_loader):
-        src_iter = iter(source_loader)
-        tgt_iter = cycle(target_loader)
-        steps = len(source_loader)
-    else:
-        src_iter = cycle(source_loader)
-        tgt_iter = iter(target_loader)
-        steps = len(target_loader)
+    src_iter = iter(source_loader)
+    tgt_iter = iter(target_loader)
+    steps = max(len(source_loader), len(target_loader))
 
     for _ in range(steps):
-        yield next(src_iter), next(tgt_iter)
+        src_batch, src_iter = _next_batch(source_loader, src_iter)
+        tgt_batch, tgt_iter = _next_batch(target_loader, tgt_iter)
+        yield src_batch, tgt_batch
 
 
 def _move_batch(batch: Dict, device: torch.device) -> Dict:
@@ -56,17 +62,6 @@ def _move_batch(batch: Dict, device: torch.device) -> Dict:
     for k, v in batch.items():
         moved[k] = v.to(device) if isinstance(v, torch.Tensor) else v
     return moved
-
-
-def _apply_am_softmax_margin(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    margin: float,
-    scale: float,
-) -> torch.Tensor:
-    one_hot = torch.zeros_like(logits)
-    one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-    return logits - one_hot * (margin * scale)
 
 
 def train_one_epoch(
@@ -109,13 +104,7 @@ def train_one_epoch(
         logits = src_out["logits"]
 
         if "am_logits" in src_out:
-            am_logits = _apply_am_softmax_margin(
-                src_out["am_logits"],
-                src_labels,
-                margin=model.classifier.am_m,
-                scale=model.classifier.am_s,
-            )
-            loss_cls = criterion_cls(am_logits, src_labels)
+            loss_cls = criterion_cls(src_out["am_logits"], src_labels)
         else:
             loss_cls = criterion_cls(logits, src_labels)
 

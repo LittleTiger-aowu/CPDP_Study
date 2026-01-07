@@ -1,8 +1,10 @@
 # src/data/dataset.py
 import json
-import torch
 import logging
-from typing import List, Dict, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import torch
 from torch.utils.data import Dataset
 
 # 初始化 Logger
@@ -27,9 +29,16 @@ class CPDPDataset(Dataset):
             max_length: int = 224,
             label_key: str = "target",
             domain_key: str = "domain",
+            code_key: str = "code",
+            code_key_fallbacks: Optional[List[str]] = None,
+            domain_key_fallbacks: Optional[List[str]] = None,
+            domain_map: Optional[Dict[str, int]] = None,
+            default_domain_value: Optional[int] = None,
             use_ast: bool = True,
             strict_graph_check: bool = True,
             in_memory: bool = True,
+            ast_cache_dir: Optional[str] = None,
+            ast_cache_fallback_to_jsonl: bool = True,
     ):
         """
         Args:
@@ -38,17 +47,32 @@ class CPDPDataset(Dataset):
             max_length: 文本截断长度.
             label_key: 缺陷标签键名 (JSONL中的key).
             domain_key: 域标签键名 (JSONL中的key).
+            code_key: 源代码键名 (JSONL中的key).
+            code_key_fallbacks: 源代码备用键名列表.
+            domain_key_fallbacks: 域标签备用键名列表.
+            domain_map: 域标签字符串映射表 (例如 {"FFmpeg": 0, "QEMU": 1}).
+            default_domain_value: 当 domain_key 不存在时使用的默认域标签.
             use_ast: 是否处理 AST 数据.
             strict_graph_check: 是否对 AST 边索引做越界检查.
             in_memory: 是否一次性加载到内存 (建议 True 以加速).
+            ast_cache_dir: 离线 AST 缓存目录 (含 .pt 文件).
+            ast_cache_fallback_to_jsonl: 缓存缺失时是否退回 JSONL AST 字段.
         """
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.label_key = label_key
         self.domain_key = domain_key
+        fallback_code_keys = code_key_fallbacks or ["func"]
+        self.code_keys = [code_key] + [k for k in fallback_code_keys if k != code_key]
+        fallback_domain_keys = domain_key_fallbacks or []
+        self.domain_keys = [domain_key] + [k for k in fallback_domain_keys if k != domain_key]
+        self.domain_map = domain_map or {}
+        self.default_domain_value = default_domain_value
         self.use_ast = use_ast
         self.strict_graph_check = strict_graph_check
+        self.ast_cache_dir = Path(ast_cache_dir) if ast_cache_dir else None
+        self.ast_cache_fallback_to_jsonl = ast_cache_fallback_to_jsonl
 
         self.data: List[Dict] = []
 
@@ -69,8 +93,111 @@ class CPDPDataset(Dataset):
 
         logger.info(f"Loaded {len(self.data)} samples.")
 
+    def _get_code_text(self, item: Dict[str, Any]) -> str:
+        for key in self.code_keys:
+            if key in item:
+                value = item.get(key, "")
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    return value
+                return str(value)
+        return ""
+
+    def _get_domain_value(self, item: Dict[str, Any]) -> int:
+        raw_value = None
+        for key in self.domain_keys:
+            if key in item:
+                raw_value = item.get(key)
+                break
+
+        if raw_value is None:
+            if self.default_domain_value is not None:
+                return int(self.default_domain_value)
+            return 0
+
+        if isinstance(raw_value, bool):
+            return int(raw_value)
+        if isinstance(raw_value, (int, float)):
+            return int(raw_value)
+        if isinstance(raw_value, str):
+            if raw_value.isdigit() or (raw_value.startswith("-") and raw_value[1:].isdigit()):
+                return int(raw_value)
+            if raw_value in self.domain_map:
+                return int(self.domain_map[raw_value])
+            logger.warning(
+                "Domain value '%s' could not be mapped. Using default (%s).",
+                raw_value,
+                self.default_domain_value if self.default_domain_value is not None else 0,
+            )
+            return int(self.default_domain_value) if self.default_domain_value is not None else 0
+
+        return int(self.default_domain_value) if self.default_domain_value is not None else 0
+
     def __len__(self) -> int:
         return len(self.data)
+
+    @staticmethod
+    def _sanitize_filename(value: Any) -> str:
+        return "".join([c if c.isalnum() or c in ("_", "-") else "_" for c in str(value)])
+
+    def _get_ast_cache_path(self, item: Dict[str, Any], idx: int) -> Optional[Path]:
+        if not self.ast_cache_dir:
+            return None
+        project = item.get("project", "unknown")
+        commit_id = item.get("commit_id", "unknown")
+        item_idx = item.get("idx", idx)
+        safe_proj = self._sanitize_filename(project)
+        safe_commit = self._sanitize_filename(commit_id)
+        safe_idx = self._sanitize_filename(item_idx)
+        filename = f"{safe_proj}__{safe_commit}__{safe_idx}.pt"
+        return self.ast_cache_dir / filename
+
+    def _validate_ast_edge_index(self, ast_edge_index: torch.Tensor, num_nodes: int) -> None:
+        if not self.strict_graph_check or ast_edge_index.numel() == 0:
+            return
+        max_idx = ast_edge_index.max().item()
+        min_idx = ast_edge_index.min().item()
+        if max_idx >= num_nodes or min_idx < 0:
+            msg = (f"AST Edge Index Out of Bounds: "
+                   f"Node count={num_nodes}, but edge refs {max_idx}(max)/{min_idx}(min).")
+            raise ValueError(msg)
+
+    def _load_ast_from_cache(self, payload: Any) -> Dict[str, torch.Tensor]:
+        if not isinstance(payload, dict):
+            return {
+                "ast_x": torch.tensor([], dtype=torch.long),
+                "ast_edge_index": torch.zeros((2, 0), dtype=torch.long),
+            }
+        ast_x = payload.get("ast_x")
+        ast_edge_index = payload.get("ast_edge_index")
+        if ast_x is None or ast_edge_index is None:
+            return {
+                "ast_x": torch.tensor([], dtype=torch.long),
+                "ast_edge_index": torch.zeros((2, 0), dtype=torch.long),
+            }
+
+        if not torch.is_tensor(ast_x):
+            ast_x = torch.tensor(ast_x, dtype=torch.long)
+        else:
+            ast_x = ast_x.to(dtype=torch.long)
+
+        if not torch.is_tensor(ast_edge_index):
+            ast_edge_index = torch.tensor(ast_edge_index, dtype=torch.long)
+        else:
+            ast_edge_index = ast_edge_index.to(dtype=torch.long)
+
+        if ast_edge_index.numel() == 0:
+            ast_edge_index = torch.zeros((2, 0), dtype=torch.long)
+        elif ast_edge_index.dim() == 2 and ast_edge_index.size(0) == 2:
+            ast_edge_index = ast_edge_index.contiguous()
+        elif ast_edge_index.dim() == 2 and ast_edge_index.size(1) == 2:
+            ast_edge_index = ast_edge_index.t().contiguous()
+        else:
+            raise ValueError(f"AST edges format error in cache. Got shape {ast_edge_index.shape}")
+
+        self._validate_ast_edge_index(ast_edge_index, ast_x.size(0))
+        return {"ast_x": ast_x, "ast_edge_index": ast_edge_index}
 
     def _process_ast(self, node_types: List[int], edges: List[List[int]]) -> Dict[str, torch.Tensor]:
         """
@@ -107,14 +234,7 @@ class CPDPDataset(Dataset):
                 ast_edge_index = edge_tensor.t().contiguous()  # [2, E]
 
             # 3. 严格图检查 (Debug/防崩)
-            if self.strict_graph_check and ast_edge_index.size(1) > 0:
-                max_idx = ast_edge_index.max().item()
-                min_idx = ast_edge_index.min().item()
-
-                if max_idx >= num_nodes or min_idx < 0:
-                    msg = (f"AST Edge Index Out of Bounds: "
-                           f"Node count={num_nodes}, but edge refs {max_idx}(max)/{min_idx}(min).")
-                    raise ValueError(msg)
+            self._validate_ast_edge_index(ast_edge_index, num_nodes)
 
         return {
             "ast_x": ast_x,
@@ -127,7 +247,7 @@ class CPDPDataset(Dataset):
         # -------------------------
         # 1. 文本处理 (Tokenization)
         # -------------------------
-        code_text = item.get("code", "")
+        code_text = self._get_code_text(item)
         # Tokenizer 调用: 不做 batch padding (padding=False)，由 collate 负责
         encoding = self.tokenizer(
             code_text,
@@ -142,7 +262,7 @@ class CPDPDataset(Dataset):
             "attention_mask": torch.tensor(encoding["attention_mask"], dtype=torch.long),
             # 标签数据 (默认处理为标量，collate 会 stack)
             self.label_key: int(item.get(self.label_key, 0)),
-            self.domain_key: int(item.get(self.domain_key, 0))
+            self.domain_key: self._get_domain_value(item)
         }
 
         # 兼容 RoBERTa (没有 token_type_ids) 和 BERT (有)
@@ -153,11 +273,24 @@ class CPDPDataset(Dataset):
         # 2. AST 处理 (Optional)
         # -------------------------
         if self.use_ast:
-            # JSONL 键名契约: 'ast_node_types', 'ast_edges'
-            raw_nodes = item.get("ast_node_types", [])
-            raw_edges = item.get("ast_edges", [])
+            ast_data = None
+            if self.ast_cache_dir:
+                cache_path = self._get_ast_cache_path(item, idx)
+                if cache_path and cache_path.exists():
+                    payload = torch.load(cache_path, map_location="cpu")
+                    ast_data = self._load_ast_from_cache(payload)
+                elif not self.ast_cache_fallback_to_jsonl:
+                    ast_data = {
+                        "ast_x": torch.tensor([], dtype=torch.long),
+                        "ast_edge_index": torch.zeros((2, 0), dtype=torch.long),
+                    }
 
-            ast_data = self._process_ast(raw_nodes, raw_edges)
+            if ast_data is None:
+                # JSONL 键名契约: 'ast_node_types', 'ast_edges'
+                raw_nodes = item.get("ast_node_types", [])
+                raw_edges = item.get("ast_edges", [])
+                ast_data = self._process_ast(raw_nodes, raw_edges)
+
             res.update(ast_data)
 
             # Dataset 不产生 ast_batch，这是 Collate 的职责
