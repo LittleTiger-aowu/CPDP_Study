@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import cycle
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, Iterator
 
 import numpy as np
 import torch
@@ -34,21 +33,28 @@ def compute_grl_lambda(epoch_idx: int, cfg: Dict) -> float:
     return lambda_max * progress
 
 
+def _next_batch(loader: DataLoader, iterator: Iterator[Dict]) -> Tuple[Dict, Iterator[Dict]]:
+    try:
+        batch = next(iterator)
+        return batch, iterator
+    except StopIteration:
+        iterator = iter(loader)
+        batch = next(iterator)
+        return batch, iterator
+
+
 def _iter_pairs(
     source_loader: DataLoader,
     target_loader: DataLoader,
 ) -> Iterable[Tuple[Dict, Dict]]:
-    if len(source_loader) >= len(target_loader):
-        src_iter = iter(source_loader)
-        tgt_iter = cycle(target_loader)
-        steps = len(source_loader)
-    else:
-        src_iter = cycle(source_loader)
-        tgt_iter = iter(target_loader)
-        steps = len(target_loader)
+    src_iter = iter(source_loader)
+    tgt_iter = iter(target_loader)
+    steps = max(len(source_loader), len(target_loader))
 
     for _ in range(steps):
-        yield next(src_iter), next(tgt_iter)
+        src_batch, src_iter = _next_batch(source_loader, src_iter)
+        tgt_batch, tgt_iter = _next_batch(target_loader, tgt_iter)
+        yield src_batch, tgt_batch
 
 
 def _move_batch(batch: Dict, device: torch.device) -> Dict:
