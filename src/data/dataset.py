@@ -239,21 +239,40 @@ class CPDPDataset(Dataset):
         item = self.data[idx]
 
         # -------------------------
-        # 1. 文本处理 (Tokenization)
+        # 1. 文本处理 (Head+Tail Tokenization)
         # -------------------------
         code_text = self._get_code_text(item)
         # Tokenizer 调用: 不做 batch padding (padding=False)，由 collate 负责
+        # 这里不启用 truncation，手动做 Head+Tail 截断
         encoding = self.tokenizer(
             code_text,
-            truncation=True,
-            max_length=self.max_length,
+            truncation=False,
             padding=False,
             return_token_type_ids=True  # CodeBERT/BERT 需要，RoBERTa 不需要(但兼容)
         )
 
+        input_ids = encoding["input_ids"]
+        attention_mask = encoding["attention_mask"]
+        token_type_ids = encoding.get("token_type_ids", [])
+
+        max_len = self.max_length
+        current_len = len(input_ids)
+        if current_len > max_len:
+            capacity = max_len - 2
+            head_len = capacity // 2
+            tail_len = capacity - head_len
+            input_ids = (
+                [input_ids[0]]
+                + input_ids[1: 1 + head_len]
+                + input_ids[-1 - tail_len: -1]
+                + [input_ids[-1]]
+            )
+            attention_mask = [1] * len(input_ids)
+            token_type_ids = [0] * len(input_ids)
+
         res = {
-            "input_ids": torch.tensor(encoding["input_ids"], dtype=torch.long),
-            "attention_mask": torch.tensor(encoding["attention_mask"], dtype=torch.long),
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             # 标签数据 (默认处理为标量，collate 会 stack)
             self.label_key: int(item.get(self.label_key, 0)),
             self.domain_key: self._get_domain_value(item)
@@ -261,7 +280,7 @@ class CPDPDataset(Dataset):
 
         # 兼容 RoBERTa (没有 token_type_ids) 和 BERT (有)
         if "token_type_ids" in encoding:
-            res["token_type_ids"] = torch.tensor(encoding["token_type_ids"], dtype=torch.long)
+            res["token_type_ids"] = torch.tensor(token_type_ids, dtype=torch.long)
 
         # -------------------------
         # 2. AST 处理 (Optional)
