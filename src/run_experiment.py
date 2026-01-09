@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -359,6 +360,29 @@ def main() -> None:
 
     test_metrics = trainer.evaluate(test_loader)
     logging.info("Final Test Metrics: %s", test_metrics)
+
+    exp_cfg = cfg.get("experiment", {})
+    exp_name = exp_cfg.get("run_name") or os.path.splitext(os.path.basename(args.config))[0]
+    project_name = os.path.basename(os.path.abspath(args.project_dir))
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    results_path = os.path.join(repo_root, "experiment_results.csv")
+    results_row = {
+        "Project": project_name,
+        "F1": test_metrics.get("f1", 0.0),
+        "MCC": test_metrics.get("mcc", 0.0),
+        "AUC": test_metrics.get("auc", 0.0),
+        "Recall": test_metrics.get("recall", 0.0),
+        "PF": test_metrics.get("pf", 0.0),
+        "Config_Name": exp_name,
+    }
+
+    os.makedirs(os.path.dirname(results_path), exist_ok=True)
+    write_header = not os.path.exists(results_path) or os.path.getsize(results_path) == 0
+    with open(results_path, "a", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=list(results_row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(results_row)
 
 
 if __name__ == "__main__":

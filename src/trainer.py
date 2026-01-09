@@ -145,6 +145,8 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
 
     precision = tp / (tp + fp + 1e-12)
     recall = tp / (tp + fn + 1e-12)
+    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-12)
+    pf = fp / (fp + tn + 1e-12)
     f1 = 2 * precision * recall / (precision + recall + 1e-12)
 
     mcc_denom = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-12)
@@ -162,7 +164,15 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
         sum_ranks = np.sum(ranks[pos])
         auc = (sum_ranks - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
 
-    return {"f1": float(f1), "mcc": float(mcc), "auc": float(auc)}
+    return {
+        "f1": float(f1),
+        "mcc": float(mcc),
+        "auc": float(auc),
+        "precision": float(precision),
+        "recall": float(recall),
+        "accuracy": float(accuracy),
+        "pf": float(pf),
+    }
 
 
 @torch.no_grad()
