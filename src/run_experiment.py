@@ -12,6 +12,13 @@ from typing import Dict, Any
 import numpy as np
 import torch
 import yaml
+import transformers
+# --- 新增代码开始 ---
+# 只有报错才显示，警告全部闭嘴
+transformers.logging.set_verbosity_error()
+import warnings
+warnings.filterwarnings("ignore")
+# --- 新增代码结束 ---
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 

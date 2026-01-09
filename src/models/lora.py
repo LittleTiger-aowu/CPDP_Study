@@ -1,9 +1,8 @@
 """Lightweight LoRA injection utilities for CodeBERT-style encoders."""
-#src/models/lora.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -80,7 +79,7 @@ def apply_lora(
     r: int = 8,
     alpha: float = 16,
     dropout: float = 0.05,
-    target_modules: Iterable[str] | None = None,
+    target_modules: Union[Iterable[str], None] = None,
 ) -> nn.Module:
     """Inject LoRA modules into CodeBERT encoder layers.
 
@@ -94,15 +93,34 @@ def apply_lora(
     cfg = LoraConfig(r=r, alpha=alpha, dropout=dropout, target_modules=targets)
 
     encoder = None
-    if hasattr(model, "model") and hasattr(model.model, "roberta"):
+
+    # --- 修复逻辑开始 ---
+    # 1. 针对 CodeBertEncoder 包装 AutoModel (RobertaModel) 的情况
+    # 结构: wrapper.model -> RobertaModel -> .encoder
+    if hasattr(model, "model") and hasattr(model.model, "encoder"):
+        encoder = model.model.encoder
+
+    # 2. 针对 CodeBertEncoder 包装 RobertaForSequenceClassification 的情况
+    # 结构: wrapper.model -> RobertaFor... -> .roberta -> .encoder
+    elif hasattr(model, "model") and hasattr(model.model, "roberta") and hasattr(model.model.roberta, "encoder"):
         encoder = model.model.roberta.encoder
-    elif hasattr(model, "roberta") and hasattr(model.roberta, "encoder"):
-        encoder = model.roberta.encoder
+
+    # 3. 针对直接传入 RobertaModel 的情况
     elif hasattr(model, "encoder"):
         encoder = model.encoder
 
+    # 4. 针对直接传入 RobertaForSequenceClassification 的情况
+    elif hasattr(model, "roberta") and hasattr(model.roberta, "encoder"):
+        encoder = model.roberta.encoder
+    # --- 修复逻辑结束 ---
+
     if encoder is None:
-        raise ValueError("Unable to locate encoder on model for LoRA injection.")
+        # 打印调试信息帮助定位
+        structure_hint = f"Model type: {type(model)}\nAttrs: {list(model.__dict__.keys())}"
+        if hasattr(model, "model"):
+             structure_hint += f"\nInner Model type: {type(model.model)}\nInner Attrs: {list(model.model.__dict__.keys())}"
+
+        raise ValueError(f"Unable to locate encoder on model for LoRA injection.\nDebug Info:\n{structure_hint}")
 
     _apply_to_encoder_layers(encoder, targets, cfg)
     return model

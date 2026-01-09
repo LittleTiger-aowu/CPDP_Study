@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm  # <---【新增 1】引入进度条库
 
 from src.losses.orthogonal import orthogonal_loss
 
@@ -44,8 +45,8 @@ def _next_batch(loader: DataLoader, iterator: Iterator[Dict]) -> Tuple[Dict, Ite
 
 
 def _iter_pairs(
-    source_loader: DataLoader,
-    target_loader: DataLoader,
+        source_loader: DataLoader,
+        target_loader: DataLoader,
 ) -> Iterable[Tuple[Dict, Dict]]:
     src_iter = iter(source_loader)
     tgt_iter = iter(target_loader)
@@ -65,13 +66,13 @@ def _move_batch(batch: Dict, device: torch.device) -> Dict:
 
 
 def train_one_epoch(
-    model: nn.Module,
-    source_loader: DataLoader,
-    target_loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    cfg: Dict,
-    device: torch.device,
-    epoch_idx: int,
+        model: nn.Module,
+        source_loader: DataLoader,
+        target_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        cfg: Dict,
+        device: torch.device,
+        epoch_idx: int,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -91,7 +92,12 @@ def train_one_epoch(
     criterion_cls = nn.CrossEntropyLoss()
     criterion_dom = nn.CrossEntropyLoss()
 
-    for src_batch, tgt_batch in _iter_pairs(source_loader, target_loader):
+    # ---【新增 2】计算总步数并包装进度条 ---
+    steps = max(len(source_loader), len(target_loader))
+    progress_bar = tqdm(_iter_pairs(source_loader, target_loader), total=steps, desc=f"Epoch {epoch_idx + 1}")
+
+    # 使用 progress_bar 替代原来的 _iter_pairs(...)
+    for src_batch, tgt_batch in progress_bar:
         src_batch = _move_batch(src_batch, device)
         tgt_batch = _move_batch(tgt_batch, device)
 
@@ -133,6 +139,9 @@ def train_one_epoch(
         total_loss += float(loss.item())
         num_steps += 1
 
+        # ---【新增 3】实时更新进度条上的 Loss 显示 ---
+        progress_bar.set_postfix(loss=loss.item())
+
     return total_loss / max(1, num_steps)
 
 
@@ -149,7 +158,12 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
     pf = fp / (fp + tn + 1e-12)
     f1 = 2 * precision * recall / (precision + recall + 1e-12)
 
-    mcc_denom = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-12)
+    # ---【修复】使用 np.float64 防止整数溢出 ---
+    term1 = np.float64(tp + fp)
+    term2 = np.float64(tp + fn)
+    term3 = np.float64(tn + fp)
+    term4 = np.float64(tn + fn)
+    mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
     mcc = ((tp * tn) - (fp * fn)) / mcc_denom
 
     order = np.argsort(y_score)
@@ -177,10 +191,10 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
 
 @torch.no_grad()
 def evaluate(
-    model: nn.Module,
-    loader: DataLoader,
-    cfg: Dict,
-    device: torch.device,
+        model: nn.Module,
+        loader: DataLoader,
+        cfg: Dict,
+        device: torch.device,
 ) -> Dict[str, float]:
     model.eval()
     label_key = cfg.get("data", {}).get("label_key", "target")
@@ -188,6 +202,7 @@ def evaluate(
     all_labels = []
     all_scores = []
 
+    # 你也可以在这里加一个 tqdm，不过验证集通常跑得快，不加也行
     for batch in loader:
         batch = _move_batch(batch, device)
         outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
@@ -202,14 +217,14 @@ def evaluate(
 
 
 def train(
-    model: nn.Module,
-    source_loader: DataLoader,
-    target_loader: DataLoader,
-    valid_loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    cfg: Dict,
-    device: torch.device,
-    save_path: str,
+        model: nn.Module,
+        source_loader: DataLoader,
+        target_loader: DataLoader,
+        valid_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        cfg: Dict,
+        device: torch.device,
+        save_path: str,
 ) -> TrainState:
     epochs = int(cfg.get("train", {}).get("epochs", 1))
     state = TrainState()
@@ -227,6 +242,10 @@ def train(
 
         metrics = evaluate(model, valid_loader, cfg, device)
         improved = False
+
+        # 打印当前 Epoch 的评估结果
+        print(f"Epoch {epoch + 1} Valid: F1={metrics['f1']:.4f}, MCC={metrics['mcc']:.4f}, AUC={metrics['auc']:.4f}")
+
         if metrics["f1"] > state.best_f1:
             state.best_f1 = metrics["f1"]
             improved = True
@@ -241,12 +260,12 @@ def train(
 
 class CPDPTrainer:
     def __init__(
-        self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        cfg: Dict,
-        device: torch.device,
-        save_path: str,
+            self,
+            model: nn.Module,
+            optimizer: torch.optim.Optimizer,
+            cfg: Dict,
+            device: torch.device,
+            save_path: str,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -255,10 +274,10 @@ class CPDPTrainer:
         self.save_path = save_path
 
     def train(
-        self,
-        source_loader: DataLoader,
-        target_loader: DataLoader,
-        valid_loader: DataLoader,
+            self,
+            source_loader: DataLoader,
+            target_loader: DataLoader,
+            valid_loader: DataLoader,
     ) -> TrainState:
         return train(
             model=self.model,
