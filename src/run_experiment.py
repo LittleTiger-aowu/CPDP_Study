@@ -214,7 +214,11 @@ def main() -> None:
             logging.error("JSONL validation failed for %s (%s).", name, path)
             return
 
-    tokenizer = _load_tokenizer("microsoft/codebert-base")
+    # 1. 从配置(cfg)中读取你在 yaml 里写的路径
+    model_path = cfg.get("model", {}).get("encoder", {}).get("pretrained_path", "microsoft/codebert-base")
+
+    # 2. 使用读取到的路径加载 Tokenizer
+    tokenizer = _load_tokenizer(model_path)
 
     use_ast = cfg.get("model", {}).get("ast", {}).get("enable", False)
     max_length = cfg.get("model", {}).get("encoder", {}).get("max_length", 224)

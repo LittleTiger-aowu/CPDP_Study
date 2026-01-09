@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import logging
@@ -182,7 +184,7 @@ class CPDPModel(nn.Module):
                     param.requires_grad = False
             logger.info(f"[CPDPModel] Frozen embeddings + {frozen} encoder layers.")
 
-    def forward(self, batch: dict, cfg: dict, epoch_idx: int = None, grl_lambda: float | None = None) -> dict:
+    def forward(self, batch: dict, cfg: dict, epoch_idx: int = None, grl_lambda: Optional[float] = None) -> dict:
         """
         Args:
             batch: Data batch (must contain ast_x/ast_edge_index/ast_batch if ast enabled)

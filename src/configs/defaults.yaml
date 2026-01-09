@@ -23,7 +23,7 @@ data:
 model:
   encoder:
     name: "codebert"
-    pretrained_path: "CodeBERT"     # 本地路径或 HF id
+    pretrained_path: "E:/project/WYP/CPDP/CodeBert"     # 本地路径或 HF id
     max_length: 224
     pooling: "cls"                  # "cls" | "mean"
     freeze_n_layers: 0
