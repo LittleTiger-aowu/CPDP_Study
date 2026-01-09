@@ -25,7 +25,7 @@ def parse_code_to_graph(code_bytes, parser):
         tree = parser.parse(code_bytes)
         root_node = tree.root_node
 
-        if root_node.byte_size == 0 or len(root_node.children) == 0:
+        if (root_node.end_byte - root_node.start_byte) == 0 or len(root_node.children) == 0:
             return [], []
 
         node_types = []
