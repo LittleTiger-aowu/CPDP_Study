@@ -11,7 +11,7 @@ data:
   train_jsonl: "src/data/train.jsonl"
   valid_jsonl: "src/data/valid.jsonl"
   test_jsonl:  "src/data/test.jsonl"
-  code_key: "code"            # 源代码字段
+  code_key: "func"       # 源代码字段
   code_key_fallbacks: ["func"]
   label_key: "target"          # 缺陷标签字段
   domain_key: "domain"         # 域标签字段：0=source, 1=target（建议固定）
@@ -44,7 +44,7 @@ model:
     enable: true
     shared_dim: 256
     private_dim: 256
-    clf_input: "concat"             # "shared" | "private" | "concat"
+    clf_input: "shared"             # "shared" | "private" | "concat"
 
   classifier:
     num_classes: 2
@@ -70,7 +70,7 @@ model:
     mode: "corr"                    # "corr" | "cos"
 
 train:
-  epochs: 30
+  epochs: 8
   batch_size: 16
   lr: 2.0e-5
   weight_decay: 0.01
@@ -85,7 +85,7 @@ train:
     loss_weight: true
   early_stopping:
     enable: true
-    patience: 12
+    patience: 5
     metric: "auc"                   # "auc" | "mcc" | "f1"
   eval_every_epochs: 1
 
