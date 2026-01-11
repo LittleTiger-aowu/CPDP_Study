@@ -9,6 +9,7 @@ experiment:
 
 data:
   train_jsonl: "src/data/train.jsonl"
+  target_jsonl: "src/data/valid_tgt_unlabeled.jsonl"
   valid_jsonl: "src/data/valid.jsonl"
   test_jsonl:  "src/data/test.jsonl"
   code_key: "func"       # 源代码字段
