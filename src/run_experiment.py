@@ -30,6 +30,26 @@ from src.models.lora import apply_lora, LoRALinear
 from src.trainer import CPDPTrainer
 
 
+def _resolve_device(device_cfg: str) -> torch.device:
+    device_cfg = (device_cfg or "auto").lower()
+    if device_cfg == "cpu":
+        return torch.device("cpu")
+    if device_cfg == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        logging.warning("CUDA requested but not available. Falling back to CPU.")
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _resolve_output_dir(cfg: Dict[str, Any], project_dir: str) -> str:
+    exp_cfg = cfg.get("experiment", {})
+    output_dir = exp_cfg.get("output_dir", "experiments")
+    project_name = os.path.basename(os.path.abspath(project_dir))
+    run_name = exp_cfg.get("run_name", "default")
+    return os.path.join(output_dir, project_name, run_name)
+
+
 def load_yaml(path: str) -> Dict[str, Any]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -175,18 +195,23 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_logging(args.log_path)
-    set_seed(42)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info("Using device: %s", device)
 
     cfg = load_yaml(args.config)
+    exp_cfg = cfg.get("experiment", {})
+    seed = int(exp_cfg.get("seed", 42))
+    set_seed(seed)
 
+    device = _resolve_device(exp_cfg.get("device", "auto"))
+    logging.info("Using device: %s", device)
+    output_dir = _resolve_output_dir(cfg, args.project_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    data_cfg = cfg.get("data", {})
     data_paths = {
-        "train_source": os.path.join(args.project_dir, "train.jsonl"),
-        "train_target": os.path.join(args.project_dir, "valid_tgt_unlabeled.jsonl"),
-        "valid": os.path.join(args.project_dir, "valid_src.jsonl"),
-        "test": os.path.join(args.project_dir, "test_tgt.jsonl"),
+        "train_source": data_cfg.get("train_jsonl") or os.path.join(args.project_dir, "train.jsonl"),
+        "train_target": data_cfg.get("target_jsonl") or os.path.join(args.project_dir, "valid_tgt_unlabeled.jsonl"),
+        "valid": data_cfg.get("valid_jsonl") or os.path.join(args.project_dir, "valid_src.jsonl"),
+        "test": data_cfg.get("test_jsonl") or os.path.join(args.project_dir, "test_tgt.jsonl"),
     }
 
     if not _check_data_paths(data_paths):
@@ -400,7 +425,7 @@ def main() -> None:
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
     )
 
-    save_path = os.path.join("logs", "best_model.pt")
+    save_path = os.path.join(output_dir, "best_model.pt")
     trainer = CPDPTrainer(
         model=model,
         optimizer=optimizer,
@@ -420,9 +445,12 @@ def main() -> None:
 
     exp_cfg = cfg.get("experiment", {})
     exp_name = exp_cfg.get("run_name") or os.path.splitext(os.path.basename(args.config))[0]
-    project_name = os.path.basename(os.path.abspath(args.project_dir))
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    results_path = os.path.join(repo_root, "experiment_results.csv")
+    project_name = exp_cfg.get("project") or os.path.basename(os.path.abspath(args.project_dir))
+    log_cfg = cfg.get("logging", {})
+    results_csv = log_cfg.get("results_csv", "experiments/results.csv")
+    results_path = results_csv
+    if not os.path.isabs(results_csv):
+        results_path = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), results_csv)
     results_row = {
         "Project": project_name,
         "F1": test_metrics.get("f1", 0.0),
@@ -440,6 +468,46 @@ def main() -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(results_row)
+
+    if log_cfg.get("save_predictions", False) or log_cfg.get("save_embeddings", False):
+        model.eval()
+        all_probs = []
+        all_labels = []
+        all_embeddings = []
+        with torch.no_grad():
+            for batch in test_loader:
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+                probs = torch.softmax(outputs["logits"], dim=1)[:, 1]
+                all_probs.append(probs.detach().cpu().numpy())
+                label_key = cfg.get("data", {}).get("label_key", "target")
+                if label_key in batch:
+                    all_labels.append(batch[label_key].detach().cpu().numpy())
+                if log_cfg.get("save_embeddings", False):
+                    emb = outputs.get("features_shared")
+                    if emb is not None:
+                        all_embeddings.append(emb.detach().cpu().numpy())
+
+        if log_cfg.get("save_predictions", False):
+            pred_path = os.path.join(output_dir, "test_predictions.csv")
+            probs_np = np.concatenate(all_probs, axis=0)
+            labels_np = np.concatenate(all_labels, axis=0) if all_labels else None
+            with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
+                writer = csv.writer(pred_file)
+                if labels_np is None:
+                    writer.writerow(["prob"])
+                    for prob in probs_np:
+                        writer.writerow([float(prob)])
+                else:
+                    writer.writerow(["label", "prob"])
+                    for label, prob in zip(labels_np, probs_np):
+                        writer.writerow([int(label), float(prob)])
+            logging.info("Saved predictions to %s", pred_path)
+
+        if log_cfg.get("save_embeddings", False) and all_embeddings:
+            emb_path = os.path.join(output_dir, "test_embeddings.npy")
+            np.save(emb_path, np.concatenate(all_embeddings, axis=0))
+            logging.info("Saved embeddings to %s", emb_path)
 
 
 if __name__ == "__main__":
