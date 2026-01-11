@@ -89,7 +89,12 @@ def train_one_epoch(
     ortho_mode = ortho_cfg.get("mode", "corr")
 
     grl_lambda = compute_grl_lambda(epoch_idx, cfg)
-    criterion_cls = nn.CrossEntropyLoss()
+    class_weights = cfg.get("train", {}).get("class_weights")
+    if class_weights is not None:
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
+        criterion_cls = nn.CrossEntropyLoss(weight=weight_tensor)
+    else:
+        criterion_cls = nn.CrossEntropyLoss()
     criterion_dom = nn.CrossEntropyLoss()
 
     # ---【新增 2】计算总步数并包装进度条 ---

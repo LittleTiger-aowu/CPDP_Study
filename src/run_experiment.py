@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import random
-from typing import Dict, Any
+from collections import Counter
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +20,7 @@ transformers.logging.set_verbosity_error()
 import warnings
 warnings.filterwarnings("ignore")
 # --- 新增代码结束 ---
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
 
 from src.data.collate import Collator, CollateConfig
@@ -74,6 +75,31 @@ def _check_data_paths(paths: Dict[str, str]) -> bool:
             logging.error("Missing data file for %s: %s", name, path)
             ok = False
     return ok
+
+
+def _extract_labels(dataset: CPDPDataset, label_key: str) -> List[int]:
+    labels = []
+    for item in dataset.data:
+        raw = item.get(label_key, 0)
+        try:
+            labels.append(int(raw))
+        except (TypeError, ValueError):
+            labels.append(0)
+    return labels
+
+
+def _compute_class_weights(labels: List[int], num_classes: int = 2) -> Tuple[List[float], List[float]]:
+    counts = Counter(labels)
+    total = sum(counts.values())
+    class_weights = []
+    for cls in range(num_classes):
+        count = counts.get(cls, 0)
+        if count <= 0:
+            class_weights.append(0.0)
+        else:
+            class_weights.append(total / (num_classes * count))
+    sample_weights = [class_weights[label] if label < num_classes else 0.0 for label in labels]
+    return class_weights, sample_weights
 
 
 def _validate_jsonl(
@@ -303,6 +329,25 @@ def main() -> None:
     batch_size = int(train_cfg.get("batch_size", 16))
     num_workers = int(cfg.get("data", {}).get("num_workers", 0))
     prefetch_factor = cfg.get("data", {}).get("prefetch_factor", 2)
+    imbalance_cfg = train_cfg.get("imbalance", {})
+    imbalance_enabled = bool(imbalance_cfg.get("enable", False))
+    imbalance_use_sampler = bool(imbalance_cfg.get("sampler", True))
+    imbalance_use_loss_weight = bool(imbalance_cfg.get("loss_weight", True))
+    train_sampler = None
+
+    if imbalance_enabled:
+        train_labels = _extract_labels(train_source_set, label_key)
+        class_weights, sample_weights = _compute_class_weights(train_labels, num_classes=2)
+        if imbalance_use_loss_weight:
+            cfg.setdefault("train", {})["class_weights"] = class_weights
+            logging.info("Class weights enabled: %s", class_weights)
+        if imbalance_use_sampler:
+            train_sampler = WeightedRandomSampler(
+                sample_weights,
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            logging.info("WeightedRandomSampler enabled with %d samples.", len(sample_weights))
 
     loader_kwargs = {"num_workers": num_workers, "collate_fn": collator}
     if num_workers > 0:
@@ -311,7 +356,8 @@ def main() -> None:
     train_source_loader = DataLoader(
         train_source_set,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         **loader_kwargs,
     )
     train_target_loader = DataLoader(
