@@ -79,6 +79,10 @@ train:
   bf16: true
   fp16: false
   label_smoothing: 0.0
+  imbalance:
+    enable: true
+    sampler: true
+    loss_weight: true
   early_stopping:
     enable: true
     patience: 12
