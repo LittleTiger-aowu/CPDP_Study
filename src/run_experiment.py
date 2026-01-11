@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import random
-from typing import Dict, Any
+from collections import Counter
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +20,7 @@ transformers.logging.set_verbosity_error()
 import warnings
 warnings.filterwarnings("ignore")
 # --- 新增代码结束 ---
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
 
 from src.data.collate import Collator, CollateConfig
@@ -27,6 +28,26 @@ from src.data.dataset import CPDPDataset
 from src.models.cpdp_model import CPDPModel
 from src.models.lora import apply_lora, LoRALinear
 from src.trainer import CPDPTrainer
+
+
+def _resolve_device(device_cfg: str) -> torch.device:
+    device_cfg = (device_cfg or "auto").lower()
+    if device_cfg == "cpu":
+        return torch.device("cpu")
+    if device_cfg == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        logging.warning("CUDA requested but not available. Falling back to CPU.")
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _resolve_output_dir(cfg: Dict[str, Any], project_dir: str) -> str:
+    exp_cfg = cfg.get("experiment", {})
+    output_dir = exp_cfg.get("output_dir", "experiments")
+    project_name = os.path.basename(os.path.abspath(project_dir))
+    run_name = exp_cfg.get("run_name", "default")
+    return os.path.join(output_dir, project_name, run_name)
 
 
 def load_yaml(path: str) -> Dict[str, Any]:
@@ -74,6 +95,31 @@ def _check_data_paths(paths: Dict[str, str]) -> bool:
             logging.error("Missing data file for %s: %s", name, path)
             ok = False
     return ok
+
+
+def _extract_labels(dataset: CPDPDataset, label_key: str) -> List[int]:
+    labels = []
+    for item in dataset.data:
+        raw = item.get(label_key, 0)
+        try:
+            labels.append(int(raw))
+        except (TypeError, ValueError):
+            labels.append(0)
+    return labels
+
+
+def _compute_class_weights(labels: List[int], num_classes: int = 2) -> Tuple[List[float], List[float]]:
+    counts = Counter(labels)
+    total = sum(counts.values())
+    class_weights = []
+    for cls in range(num_classes):
+        count = counts.get(cls, 0)
+        if count <= 0:
+            class_weights.append(0.0)
+        else:
+            class_weights.append(total / (num_classes * count))
+    sample_weights = [class_weights[label] if label < num_classes else 0.0 for label in labels]
+    return class_weights, sample_weights
 
 
 def _validate_jsonl(
@@ -149,18 +195,23 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_logging(args.log_path)
-    set_seed(42)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info("Using device: %s", device)
 
     cfg = load_yaml(args.config)
+    exp_cfg = cfg.get("experiment", {})
+    seed = int(exp_cfg.get("seed", 42))
+    set_seed(seed)
 
+    device = _resolve_device(exp_cfg.get("device", "auto"))
+    logging.info("Using device: %s", device)
+    output_dir = _resolve_output_dir(cfg, args.project_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    data_cfg = cfg.get("data", {})
     data_paths = {
-        "train_source": os.path.join(args.project_dir, "train.jsonl"),
-        "train_target": os.path.join(args.project_dir, "valid_tgt_unlabeled.jsonl"),
-        "valid": os.path.join(args.project_dir, "valid_src.jsonl"),
-        "test": os.path.join(args.project_dir, "test_tgt.jsonl"),
+        "train_source": data_cfg.get("train_jsonl") or os.path.join(args.project_dir, "train.jsonl"),
+        "train_target": data_cfg.get("target_jsonl") or os.path.join(args.project_dir, "valid_tgt_unlabeled.jsonl"),
+        "valid": data_cfg.get("valid_jsonl") or os.path.join(args.project_dir, "valid_src.jsonl"),
+        "test": data_cfg.get("test_jsonl") or os.path.join(args.project_dir, "test_tgt.jsonl"),
     }
 
     if not _check_data_paths(data_paths):
@@ -303,6 +354,25 @@ def main() -> None:
     batch_size = int(train_cfg.get("batch_size", 16))
     num_workers = int(cfg.get("data", {}).get("num_workers", 0))
     prefetch_factor = cfg.get("data", {}).get("prefetch_factor", 2)
+    imbalance_cfg = train_cfg.get("imbalance", {})
+    imbalance_enabled = bool(imbalance_cfg.get("enable", False))
+    imbalance_use_sampler = bool(imbalance_cfg.get("sampler", True))
+    imbalance_use_loss_weight = bool(imbalance_cfg.get("loss_weight", True))
+    train_sampler = None
+
+    if imbalance_enabled:
+        train_labels = _extract_labels(train_source_set, label_key)
+        class_weights, sample_weights = _compute_class_weights(train_labels, num_classes=2)
+        if imbalance_use_loss_weight:
+            cfg.setdefault("train", {})["class_weights"] = class_weights
+            logging.info("Class weights enabled: %s", class_weights)
+        if imbalance_use_sampler:
+            train_sampler = WeightedRandomSampler(
+                sample_weights,
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            logging.info("WeightedRandomSampler enabled with %d samples.", len(sample_weights))
 
     loader_kwargs = {"num_workers": num_workers, "collate_fn": collator}
     if num_workers > 0:
@@ -311,7 +381,8 @@ def main() -> None:
     train_source_loader = DataLoader(
         train_source_set,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         **loader_kwargs,
     )
     train_target_loader = DataLoader(
@@ -354,7 +425,7 @@ def main() -> None:
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
     )
 
-    save_path = os.path.join("logs", "best_model.pt")
+    save_path = os.path.join(output_dir, "best_model.pt")
     trainer = CPDPTrainer(
         model=model,
         optimizer=optimizer,
@@ -374,9 +445,12 @@ def main() -> None:
 
     exp_cfg = cfg.get("experiment", {})
     exp_name = exp_cfg.get("run_name") or os.path.splitext(os.path.basename(args.config))[0]
-    project_name = os.path.basename(os.path.abspath(args.project_dir))
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    results_path = os.path.join(repo_root, "experiment_results.csv")
+    project_name = exp_cfg.get("project") or os.path.basename(os.path.abspath(args.project_dir))
+    log_cfg = cfg.get("logging", {})
+    results_csv = log_cfg.get("results_csv", "experiments/results.csv")
+    results_path = results_csv
+    if not os.path.isabs(results_csv):
+        results_path = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), results_csv)
     results_row = {
         "Project": project_name,
         "F1": test_metrics.get("f1", 0.0),
@@ -394,6 +468,46 @@ def main() -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(results_row)
+
+    if log_cfg.get("save_predictions", False) or log_cfg.get("save_embeddings", False):
+        model.eval()
+        all_probs = []
+        all_labels = []
+        all_embeddings = []
+        with torch.no_grad():
+            for batch in test_loader:
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+                probs = torch.softmax(outputs["logits"], dim=1)[:, 1]
+                all_probs.append(probs.detach().cpu().numpy())
+                label_key = cfg.get("data", {}).get("label_key", "target")
+                if label_key in batch:
+                    all_labels.append(batch[label_key].detach().cpu().numpy())
+                if log_cfg.get("save_embeddings", False):
+                    emb = outputs.get("features_shared")
+                    if emb is not None:
+                        all_embeddings.append(emb.detach().cpu().numpy())
+
+        if log_cfg.get("save_predictions", False):
+            pred_path = os.path.join(output_dir, "test_predictions.csv")
+            probs_np = np.concatenate(all_probs, axis=0)
+            labels_np = np.concatenate(all_labels, axis=0) if all_labels else None
+            with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
+                writer = csv.writer(pred_file)
+                if labels_np is None:
+                    writer.writerow(["prob"])
+                    for prob in probs_np:
+                        writer.writerow([float(prob)])
+                else:
+                    writer.writerow(["label", "prob"])
+                    for label, prob in zip(labels_np, probs_np):
+                        writer.writerow([int(label), float(prob)])
+            logging.info("Saved predictions to %s", pred_path)
+
+        if log_cfg.get("save_embeddings", False) and all_embeddings:
+            emb_path = os.path.join(output_dir, "test_embeddings.npy")
+            np.save(emb_path, np.concatenate(all_embeddings, axis=0))
+            logging.info("Saved embeddings to %s", emb_path)
 
 
 if __name__ == "__main__":

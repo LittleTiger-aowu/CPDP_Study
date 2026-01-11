@@ -141,7 +141,9 @@ class CPDPModel(nn.Module):
         self.classifier = ClassifierHead(
             in_dim=clf_in_dim,
             num_classes=clf_cfg.get("num_classes", 2),
-            loss_type=clf_cfg.get("loss_type", "ce")
+            loss_type=clf_cfg.get("loss_type", "ce"),
+            am_s=clf_cfg.get("am_softmax", {}).get("scale", 30.0),
+            am_m=clf_cfg.get("am_softmax", {}).get("margin", 0.35),
         )
         self.clf_input_mode = clf_input_mode
 
