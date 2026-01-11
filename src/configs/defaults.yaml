@@ -8,10 +8,10 @@ experiment:
   device: "cuda"
 
 data:
-  train_jsonl: "src/data/train.jsonl"
-  target_jsonl: "src/data/valid_tgt_unlabeled.jsonl"
-  valid_jsonl: "src/data/valid.jsonl"
-  test_jsonl:  "src/data/test.jsonl"
+  train_jsonl: "src/data/cpdp_FFmpeg_to_qemu/train.jsonl"
+  target_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_tgt_unlabeled.jsonl"
+  valid_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_src.jsonl"
+  test_jsonl:  "src/data/cpdp_FFmpeg_to_qemu/test_tgt.jsonl"
   code_key: "func"       # 源代码字段
   code_key_fallbacks: ["func"]
   label_key: "target"          # 缺陷标签字段
