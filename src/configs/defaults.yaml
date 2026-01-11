@@ -9,6 +9,7 @@ experiment:
 
 data:
   train_jsonl: "src/data/train.jsonl"
+  target_jsonl: "src/data/valid_tgt_unlabeled.jsonl"
   valid_jsonl: "src/data/valid.jsonl"
   test_jsonl:  "src/data/test.jsonl"
   code_key: "code"            # 源代码字段
@@ -79,6 +80,10 @@ train:
   bf16: true
   fp16: false
   label_smoothing: 0.0
+  imbalance:
+    enable: true
+    sampler: true
+    loss_weight: true
   early_stopping:
     enable: true
     patience: 12
