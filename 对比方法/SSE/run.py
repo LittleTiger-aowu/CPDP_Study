@@ -23,6 +23,7 @@ from itertools import cycle
 from imblearn.over_sampling import RandomOverSampler
 from model import Model
 import MMD as MMD
+from preprocessing import convert_jsonl_to_features
 logger = logging.getLogger(__name__)
 from parser.DFG import DFG_python, DFG_java, DFG_ruby, DFG_go, DFG_php, DFG_javascript
 
@@ -88,6 +89,25 @@ def load_dataset(project_name, args):
     idx = torch.tensor([f.idx for f in data])
     subtrees = [f.subtrees for f in data]
 
+    return source_ids, position_idx, attn_mask, label, idx, subtrees
+
+
+def load_dataset_from_jsonl(jsonl_path, tokenizer, args, code_field="func", label_field="target", label_default=0):
+    data = convert_jsonl_to_features(
+        jsonl_path,
+        tokenizer,
+        args,
+        code_field=code_field,
+        label_field=label_field,
+        label_default=label_default,
+    )
+    source_ids = torch.tensor([f.source_ids for f in data])
+    position_idx = torch.tensor([f.position_idx for f in data])
+    attn_mask = [f.attn_mask.unsqueeze(0) for f in data]
+    attn_mask = torch.cat(attn_mask, dim=0)
+    label = torch.tensor([f.label for f in data])
+    idx = torch.tensor([f.idx for f in data])
+    subtrees = [f.subtrees for f in data]
     return source_ids, position_idx, attn_mask, label, idx, subtrees
 
 
@@ -200,7 +220,8 @@ def test(args, test_dataset, target_subtrees, model):
     # multi-gpu evaluate
     # Eval!
     logger.info("***** Running evaluation *****")
-    logger.info(args.train_data_file + '--' + args.test_data_file)
+    eval_name = args.test_jsonl if args.test_jsonl else args.test_data_file
+    logger.info(args.train_data_file + '--' + eval_name)
     logger.info("  Num examples = %d", len(test_dataset))
     logger.info("  Batch size = %d", args.test_batch_size)
     eval_loss = 0.0
@@ -247,7 +268,7 @@ def test(args, test_dataset, target_subtrees, model):
         "eval_threshold": best_threshold,
     }
     logger.info("***** Test results *****")
-    logger.info(args.train_data_file + '--' + args.test_data_file)
+    logger.info(args.train_data_file + '--' + eval_name)
     for key in sorted(result.keys()):
         logger.info("  %s = %s", key, str(round(result[key], 4)))
     return result
@@ -260,6 +281,18 @@ def main(source_project, target_project):
                         help="The input training data file (a text file).")
     parser.add_argument("--test_data_file", default=target_project, type=str,
                         help="An optional input evaluation data file to evaluate the perplexity on (a text file).")
+    parser.add_argument("--train_jsonl", default=None, type=str,
+                        help="JSONL training data file (function-level).")
+    parser.add_argument("--valid_src_jsonl", default=None, type=str,
+                        help="JSONL validation data file (source domain).")
+    parser.add_argument("--valid_tgt_unlabeled_jsonl", default=None, type=str,
+                        help="JSONL unlabeled target data file for adaptation.")
+    parser.add_argument("--test_jsonl", default=None, type=str,
+                        help="JSONL test data file (target domain).")
+    parser.add_argument("--code_field", default="func", type=str,
+                        help="JSONL field name for function code.")
+    parser.add_argument("--label_field", default="target", type=str,
+                        help="JSONL field name for label.")
     parser.add_argument("--file_dir", default="dataset/PROMISE", type=str,
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--output_dir", default=None, type=str,
@@ -331,8 +364,44 @@ def main(source_project, target_project):
     model = RobertaForSequenceClassification.from_pretrained(args.model_name_or_path, config=config)
     model = Model(model, config, tokenizer, args)
 
-    source_ids, source_position_idx, source_attn_mask, source_label, source_idx, source_subtrees = load_dataset(args.train_data_file, args)
-    target_ids, target_position_idx, target_attn_mask, target_label, target_idx, target_subtrees = load_dataset(args.test_data_file, args)
+    if args.train_jsonl:
+        source_ids, source_position_idx, source_attn_mask, source_label, source_idx, source_subtrees = load_dataset_from_jsonl(
+            args.train_jsonl,
+            tokenizer,
+            args,
+            code_field=args.code_field,
+            label_field=args.label_field,
+            label_default=0,
+        )
+    else:
+        source_ids, source_position_idx, source_attn_mask, source_label, source_idx, source_subtrees = load_dataset(
+            args.train_data_file,
+            args,
+        )
+
+    if args.valid_tgt_unlabeled_jsonl:
+        target_ids, target_position_idx, target_attn_mask, target_label, target_idx, target_subtrees = load_dataset_from_jsonl(
+            args.valid_tgt_unlabeled_jsonl,
+            tokenizer,
+            args,
+            code_field=args.code_field,
+            label_field=args.label_field,
+            label_default=0,
+        )
+    elif args.test_jsonl:
+        target_ids, target_position_idx, target_attn_mask, target_label, target_idx, target_subtrees = load_dataset_from_jsonl(
+            args.test_jsonl,
+            tokenizer,
+            args,
+            code_field=args.code_field,
+            label_field=args.label_field,
+            label_default=0,
+        )
+    else:
+        target_ids, target_position_idx, target_attn_mask, target_label, target_idx, target_subtrees = load_dataset(
+            args.test_data_file,
+            args,
+        )
     randover = RandomOverSampler()
     sample, label = randover.fit_resample(X=source_idx.unsqueeze(1), y=source_label)
     temp = []
