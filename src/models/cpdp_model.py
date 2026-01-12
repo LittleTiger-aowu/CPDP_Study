@@ -145,9 +145,10 @@ class CPDPModel(nn.Module):
             am_s=clf_cfg.get("am_softmax", {}).get("scale", 30.0),
             am_m=clf_cfg.get("am_softmax", {}).get("margin", 0.35),
         )
+        self.num_classes = clf_cfg.get("num_classes", 2)
         self.clf_input_mode = clf_input_mode
 
-        # 5. 域对抗鉴别器 (DANN)
+        # 5. 域对抗鉴别器 (CDAN)
         # -----------------------------------------------------------
         dann_cfg = cfg["model"].get("dann", {})
         # 严格激活条件: enable=True 且 weight>0
@@ -156,7 +157,7 @@ class CPDPModel(nn.Module):
         if self.use_dann:
             disc_opts = dann_cfg.get("disc", {})
             self.domain_disc = DomainDiscriminator(
-                in_dim=self.shared_dim,
+                in_dim=self.shared_dim * self.num_classes,
                 hidden_dim=disc_opts.get("hidden_dim", 1024),
                 dropout=disc_opts.get("dropout", 0.1)
             )
@@ -263,12 +264,14 @@ class CPDPModel(nn.Module):
             logits = cls_out
             am_logits = None
 
-        # 5. 域对抗 (DANN)
+        # 5. 域对抗 (CDAN)
         domain_logits = None
         if self.use_dann:
             if grl_lambda is None:
-                raise ValueError("grl_lambda must be provided when DANN is enabled.")
-            domain_logits = self.domain_disc(h_s, grl_lambda)
+                raise ValueError("grl_lambda must be provided when CDAN is enabled.")
+            softmax_probs = torch.softmax(logits, dim=-1)
+            cdan_feat = torch.bmm(h_s.unsqueeze(2), softmax_probs.unsqueeze(1)).view(h_s.size(0), -1)
+            domain_logits = self.domain_disc(cdan_feat, grl_lambda)
 
         # 6. 构建输出 (清洗 None 值防止下游 crash)
         output = {
