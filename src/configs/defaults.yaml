@@ -1,97 +1,107 @@
-#src/configs/defaults.yaml
+# CPDP跨项目缺陷预测实验配置文件
 experiment:
-  project: "cpdp_thesis"
-  seed: 2026
-  output_dir: "experiments"
-  run_name: "default"
-  save_best: true
-  device: "cuda"
+  project: "cpdp_thesis"        # 项目名称
+  seed: 2026                   # 随机种子，确保实验可复现
+  output_dir: "experiments"    # 输出目录路径
+  run_name: "default"          # 运行名称，用于区分不同实验
+  save_best: true              # 是否保存最佳模型
+  device: "cuda"               # 设备选择："cuda"或"cpu"
 
 data:
-  train_jsonl: "src/data/cpdp_FFmpeg_to_qemu/train.jsonl"
-  target_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_tgt_unlabeled.jsonl"
-  valid_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_src.jsonl"
-  test_jsonl:  "src/data/cpdp_FFmpeg_to_qemu/test_tgt.jsonl"
-  code_key: "func"       # 源代码字段
-  code_key_fallbacks: ["func"]
-  label_key: "target"          # 缺陷标签字段
-  domain_key: "domain"         # 域标签字段：0=source, 1=target（建议固定）
-  domain_key_required: false   # 若无 domain 字段，则使用数据集默认值 (source=0, target=1)
-  num_workers: 4
-  prefetch_factor: 2
-  ast_cache_dir: "data/ast_cache"
+  # 数据文件路径配置
+  train_jsonl: "src/data/cpdp_FFmpeg_to_qemu/train.jsonl"              # 源域训练数据
+  target_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_tgt_unlabeled.jsonl" # 目标域训练数据（无标签）
+  valid_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_src.jsonl"           # 验证数据
+  test_jsonl:  "src/data/cpdp_FFmpeg_to_qemu/test_tgt.jsonl"            # 测试数据
+  
+  # 数据字段配置
+  code_key: "func"                       # 代码文本字段名
+  code_key_fallbacks: ["func"]           # 代码文本字段备选名
+  label_key: "target"                    # 缺陷标签字段名
+  domain_key: "domain"                   # 域标签字段名：0=源域, 1=目标域
+  domain_key_required: false             # 是否强制要求域标签字段存在
+  num_workers: 4                         # 数据加载进程数
+  prefetch_factor: 2                     # 数据预取因子
+  ast_cache_dir: "data/ast_cache"        # AST缓存目录路径
 
 model:
+  # 编码器配置
   encoder:
-    name: "codebert"
-    pretrained_path: "E:/project/WYP/CPDP/CodeBert"     # 本地路径或 HF id
-    max_length: 224
-    pooling: "cls"                  # "cls" | "mean"
-    freeze_n_layers: 0
+    name: "codebert"                     # 编码器名称
+    pretrained_path: "E:/project/WYP/CPDP/CodeBert"  # 预训练模型路径或HF ID
+    max_length: 224                      # 最大序列长度
+    pooling: "cls"                       # 池化方式："cls"取[CLS]标记，"mean"取平均
+    freeze_n_layers: 0                   # 冻结编码器层数量（0表示不冻结）
 
+  # LoRA微调配置
   lora:
-    enable: true
-    r: 16
-    alpha: 32
-    dropout: 0.05
-    target_modules: ["query", "value"]  # 或 ["q_proj","v_proj"]，你实现时统一
+    enable: true                         # 是否启用LoRA微调
+    r: 16                                # LoRA秩（低秩矩阵的秩）
+    alpha: 32                            # LoRA缩放因子
+    dropout: 0.05                        # LoRA层的dropout概率
+    target_modules: ["query", "value"]   # 应用LoRA的目标模块（查询和值变换）
 
+  # AST（抽象语法树）配置
   ast:
-    enable: false
-    dim: 128
-    fusion: "concat"                # "concat" | "sum"
+    enable: false                        # 是否启用AST特征
+    dim: 128                             # AST特征维度
+    fusion: "concat"                     # AST与代码特征融合方式："concat"拼接或"sum"相加
 
+  # 特征解耦配置
   feature_split:
-    enable: true
-    shared_dim: 256
-    private_dim: 256
-    clf_input: "shared"             # "shared" | "private" | "concat"
+    enable: true                         # 是否启用特征解耦
+    shared_dim: 256                      # 共享特征维度（跨域知识）
+    private_dim: 256                     # 私有特征维度（域特定知识）
+    clf_input: "shared"                  # 分类器输入："shared"(共享特征) | "private"(私有特征) | "concat"(拼接)
 
+  # 分类器配置
   classifier:
-    num_classes: 2
-    loss_type: "am_softmax"         # "ce" | "am_softmax"
+    num_classes: 2                       # 分类类别数（缺陷/非缺陷）
+    loss_type: "am_softmax"              # 损失类型："ce"(交叉熵) | "am_softmax"(角度边缘软最大)
     am_softmax:
-      margin: 0.35
-      scale: 30.0
+      margin: 0.35                       # AM-Softmax的边缘值
+      scale: 30.0                        # AM-Softmax的缩放因子
 
+  # 域对抗网络配置
   dann:
-    enable: true
-    weight: 0.1
-    grl:
-      lambda_max: 0.5
-      warmup_epochs: 3
-      schedule: "linear"            # "linear" | "constant"
-    disc:
-      hidden_dim: 128
-      dropout: 0.1
+    enable: true                         # 是否启用域对抗网络
+    weight: 0.1                          # 域对抗损失权重（0.1为较稳定起点）
+    grl:                                 # 梯度反转层配置
+      lambda_max: 0.5                    # 梯度反转强度上限
+      warmup_epochs: 2                   # 预热轮数（前几轮专注学习缺陷检测，之后再进行域对齐）
+      schedule: "linear"                 # 强度调度策略："linear"线性增长
+    disc:                                # 域判别器配置
+      hidden_dim: 128                    # 判别器隐藏层维度
+      dropout: 0.1                       # 判别器dropout概率
 
+  # 正交损失配置
   ortho:
-    enable: true
-    weight: 0.1
-    mode: "corr"                    # "corr" | "cos"
+    enable: true                         # 是否启用正交损失
+    weight: 0.1                          # 正交损失权重
+    mode: "corr"                         # 正交损失模式："corr"(相关性) | "cos"(余弦)
 
 train:
-  epochs: 8
-  batch_size: 16
-  lr: 2.0e-5
-  weight_decay: 0.01
-  grad_accum_steps: 16
-  max_grad_norm: 1.0
-  bf16: true
-  fp16: false
-  label_smoothing: 0.0
-  imbalance:
-    enable: true
-    sampler: true
-    loss_weight: true
-  early_stopping:
-    enable: true
-    patience: 5
-    metric: "auc"                   # "auc" | "mcc" | "f1"
-  eval_every_epochs: 1
+  epochs: 8                              # 训练轮数
+  batch_size: 16                         # 批次大小
+  lr: 2.0e-5                             # 学习率
+  weight_decay: 0.01                     # 权重衰减系数
+  grad_accum_steps: 16                   # 梯度累积步数（模拟更大的批次）
+  max_grad_norm: 1.0                     # 梯度裁剪最大范数
+  bf16: true                             # 是否启用bfloat16混合精度训练
+  fp16: false                            # 是否启用float16混合精度训练
+  label_smoothing: 0.0                   # 标签平滑系数
+  imbalance:                             # 不平衡数据处理
+    enable: true                         # 是否启用不平衡处理
+    sampler: true                        # 是否使用采样器平衡数据
+    loss_weight: true                    # 是否在损失中使用权重平衡
+  early_stopping:                        # 早停机制
+    enable: true                         # 是否启用早停
+    patience: 5                          # 早停容忍轮数
+    metric: "auc"                        # 早停监控指标："auc" | "mcc" | "f1"
+  eval_every_epochs: 1                   # 每隔多少轮进行一次验证
 
 logging:
-  log_every_steps: 50
-  results_csv: "experiments/results.csv"
-  save_predictions: true
-  save_embeddings: false
+  log_every_steps: 50                    # 每隔多少步记录一次日志
+  results_csv: "experiments/results.csv" # 实验结果CSV文件路径
+  save_predictions: true                 # 是否保存预测结果
+  save_embeddings: false                 # 是否保存嵌入特征
