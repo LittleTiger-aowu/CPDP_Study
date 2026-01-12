@@ -1,0 +1,73 @@
+# CodeBERT Naive Transfer (v2) baseline: source-only training
+experiment:
+  project: "cpdp_thesis"
+  seed: 2026
+  output_dir: "experiments"
+  run_name: "baseline_naive_transfer_codebert_v2"
+  save_best: true
+  device: "cuda"
+
+data:
+  train_jsonl: "src/data/cpdp_FFmpeg_to_qemu/train.jsonl"
+  target_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_tgt_unlabeled.jsonl"
+  valid_jsonl: "src/data/cpdp_FFmpeg_to_qemu/valid_src.jsonl"
+  test_jsonl: "src/data/cpdp_FFmpeg_to_qemu/test_tgt.jsonl"
+  code_key: "func"
+  code_key_fallbacks: ["func"]
+  label_key: "target"
+  domain_key: "domain"
+  domain_key_required: false
+  num_workers: 4
+  prefetch_factor: 2
+  ast_cache_dir: "data/ast_cache"
+
+model:
+  encoder:
+    name: "codebert"
+    pretrained_path: "E:/project/WYP/CPDP/CodeBert"
+    max_length: 224
+    pooling: "cls"
+    freeze_n_layers: 0
+  lora:
+    enable: false
+  ast:
+    enable: false
+  feature_split:
+    enable: false
+    clf_input: "shared"
+  classifier:
+    num_classes: 2
+    loss_type: "ce"
+  dann:
+    enable: false
+    weight: 0.0
+  ortho:
+    enable: false
+    weight: 0.0
+
+train:
+  naive_transfer: true
+  epochs: 8
+  batch_size: 16
+  lr: 2.0e-5
+  weight_decay: 0.01
+  grad_accum_steps: 16
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  label_smoothing: 0.0
+  imbalance:
+    enable: true
+    sampler: true
+    loss_weight: true
+  early_stopping:
+    enable: true
+    patience: 5
+    metric: "auc"
+  eval_every_epochs: 1
+
+logging:
+  log_every_steps: 50
+  results_csv: "experiments/results.csv"
+  save_predictions: true
+  save_embeddings: false
