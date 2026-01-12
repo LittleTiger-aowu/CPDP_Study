@@ -296,21 +296,24 @@ def main() -> None:
         ast_cache_dir=ast_cache_dir,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
-    train_target_set = CPDPDataset(
-        data_path=data_paths["train_target"],
-        tokenizer=tokenizer,
-        max_length=max_length,
-        label_key=label_key,
-        domain_key=domain_key,
-        code_key=code_key,
-        code_key_fallbacks=code_key_fallbacks,
-        domain_key_fallbacks=domain_key_fallbacks,
-        domain_map=domain_map,
-        default_domain_value=1,
-        use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
-        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
-    )
+    naive_transfer = bool(cfg.get("train", {}).get("naive_transfer", False))
+    train_target_set = None
+    if not naive_transfer:
+        train_target_set = CPDPDataset(
+            data_path=data_paths["train_target"],
+            tokenizer=tokenizer,
+            max_length=max_length,
+            label_key=label_key,
+            domain_key=domain_key,
+            code_key=code_key,
+            code_key_fallbacks=code_key_fallbacks,
+            domain_key_fallbacks=domain_key_fallbacks,
+            domain_map=domain_map,
+            default_domain_value=1,
+            use_ast=use_ast,
+            ast_cache_dir=ast_cache_dir,
+            ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
+        )
     valid_set = CPDPDataset(
         data_path=data_paths["valid"],
         tokenizer=tokenizer,
@@ -385,12 +388,14 @@ def main() -> None:
         sampler=train_sampler,
         **loader_kwargs,
     )
-    train_target_loader = DataLoader(
-        train_target_set,
-        batch_size=batch_size,
-        shuffle=True,
-        **loader_kwargs,
-    )
+    train_target_loader = None
+    if train_target_set is not None:
+        train_target_loader = DataLoader(
+            train_target_set,
+            batch_size=batch_size,
+            shuffle=True,
+            **loader_kwargs,
+        )
     valid_loader = DataLoader(
         valid_set,
         batch_size=batch_size,
@@ -434,6 +439,8 @@ def main() -> None:
         save_path=save_path,
     )
 
+    if naive_transfer:
+        logging.info("Naive transfer enabled: training with source-only data.")
     trainer.train(
         source_loader=train_source_loader,
         target_loader=train_target_loader,
