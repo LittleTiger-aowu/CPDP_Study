@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
 import argparse
+import json
 import logging
 import os
 import random
@@ -9,7 +10,6 @@ from transformers import (RobertaConfig, RobertaModel, RobertaTokenizer)
 from tqdm import tqdm
 import pandas as pd
 from ParseTOASTPath import ParseToASTPath
-from parser.DFG import DFG_java
 import pickle
 from parser.utils import (remove_comments_and_docstrings,
                           tree_to_token_index,
@@ -20,18 +20,31 @@ logger = logging.getLogger(__name__)
 MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
 
 dfg_function = {
-    'java': DFG_java,
+    'c': None,
+    'cpp': None,
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 parsers = {}
-parsers['java'] = Parser()
-for lang in dfg_function:
-    LANGUAGE = Language('parser/my-languages.so', lang)
-    parser = Parser()
-    parser.set_language(LANGUAGE)
-    parser = [parser, dfg_function[lang]]
-    parsers[lang] = parser
+language_name = os.environ.get("SSE_TS_LANG", "c")
+def resolve_ts_lib_path():
+    candidates = [
+        os.environ.get("SSE_TS_LIB"),
+        os.path.join("parser", "my-languages.so"),
+        os.path.join("parser", "my-languages.dylib"),
+        os.path.join("parser", "my-languages.dll"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError("未找到 tree-sitter 语言库，请通过 SSE_TS_LIB 指定路径。")
+
+
+lib_path = resolve_ts_lib_path()
+LANGUAGE = Language(lib_path, language_name)
+parser = Parser()
+parser.set_language(LANGUAGE)
+parsers[language_name] = [parser, dfg_function.get(language_name)]
 
 
 def extract_dataflow(code, parser, lang):
@@ -52,22 +65,25 @@ def extract_dataflow(code, parser, lang):
         index_to_code = {}
         for idx, (index, code) in enumerate(zip(tokens_index, code_tokens)):
             index_to_code[index] = (idx, code)
-        try:
-            DFG, _ = parser[1](root_node, index_to_code, {})
-        except:
-            DFG = []
-        DFG = sorted(DFG, key=lambda x: x[1])
-        indexs = set()
-        for d in DFG:
-            if len(d[-1]) != 0:
-                indexs.add(d[1])
-            for x in d[-1]:
-                indexs.add(x)
-        new_DFG = []
-        for d in DFG:
-            if d[1] in indexs:
-                new_DFG.append(d)
-        dfg = new_DFG
+        if parser[1] is None:
+            dfg = []
+        else:
+            try:
+                DFG, _ = parser[1](root_node, index_to_code, {})
+            except:
+                DFG = []
+            DFG = sorted(DFG, key=lambda x: x[1])
+            indexs = set()
+            for d in DFG:
+                if len(d[-1]) != 0:
+                    indexs.add(d[1])
+                for x in d[-1]:
+                    indexs.add(x)
+            new_DFG = []
+            for d in DFG:
+                if d[1] in indexs:
+                    new_DFG.append(d)
+            dfg = new_DFG
     except:
         dfg = []
     return code_tokens, dfg
@@ -107,9 +123,37 @@ class Example(object):
         self.label = label
 
 
+def _get_code_from_record(record, code_field):
+    if code_field in record:
+        return record[code_field]
+    if "func" in record:
+        return record["func"]
+    if "code" in record:
+        return record["code"]
+    raise KeyError("JSONL 样本缺少 func/code 字段")
+
+
+def read_jsonl_examples(jsonl_path, code_field="func", label_field="target", label_default=0):
+    examples = []
+    with open(jsonl_path, "r", encoding="utf-8") as handle:
+        for idx, line in enumerate(handle):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            source = _get_code_from_record(record, code_field)
+            if label_field in record:
+                label = int(record[label_field])
+            else:
+                label = label_default
+            examples.append(Example(idx=idx, source=source, label=label))
+    return examples
+
+
 def append_suffix(df):
+    suffix = os.environ.get("SSE_FILE_SUFFIX", ".c")
     for i in range(len(df['file_name'])):
-        df.loc[i, 'file_name'] = df.loc[i, 'file_name'] + ".java"
+        df.loc[i, 'file_name'] = df.loc[i, 'file_name'] + suffix
     return df
 
 
@@ -146,29 +190,32 @@ def read_examples(args):
         if len(file_names) == 0:
             continue
 
-        index = -1
-        for _head in package_heads:
-            index = int(dir_path.find(_head))
-            if index >= 0:
-                break
-        if index < 0:
-            continue
+        if language_name == "java":
+            index = -1
+            for _head in package_heads:
+                index = int(dir_path.find(_head))
+                if index >= 0:
+                    break
+            if index < 0:
+                continue
+            package_name = dir_path[index:]
+            package_name = package_name.replace(os.sep, '.')
+        else:
+            package_name = dir_path.replace(os.sep, '.')
 
-        package_name = dir_path[index:]
-        package_name = package_name.replace(os.sep, '.')
-
+        suffix = os.environ.get("SSE_FILE_SUFFIX", ".c")
+        suffix = suffix.lstrip(".")
         for file in file_names:
-            if file.endswith('java'):
-                if str(package_name + "." + str(file)) not in handcraft_instances:
+            if file.endswith(suffix):
+                full_name = str(package_name + "." + str(file))
+                if full_name not in handcraft_instances:
                     continue
 
-                label = name_to_label[str(package_name + "." + str(file))]
+                label = name_to_label[full_name]
                 if label != 0:
                     label = 1
-                    # existed_file_names.append(str(package_name + "." + str(file)))
                 with open(str(os.path.join(dir_path, file)), 'r', encoding='utf-8', errors='ignore') as file_obj:
                     content = file_obj.read()
-                # all_data.append((label, content, str(os.path.join(dir_path, file))))
                 examples.append(Example(label=label, source=content, idx=idx))
                 idx += 1
     return examples
@@ -176,9 +223,9 @@ def read_examples(args):
 
 def convert_examples_to_features(examples, tokenizer, args):
     features = []
-    parser = parsers['java']
+    parser = parsers[os.environ.get("SSE_TS_LANG", "c")]
     for example_index, example in tqdm(enumerate(examples), total=len(examples)):
-        code_tokens, dfg = extract_dataflow(example.source, parser, 'java')
+        code_tokens, dfg = extract_dataflow(example.source, parser, language_name)
         subtrees_tokens = []
         subtrees = ParseToASTPath(example.source)
         code_tokens = [tokenizer.tokenize('@ ' + x)[1:] if idx != 0 else tokenizer.tokenize(x) for idx, x in
@@ -313,6 +360,11 @@ def convert_examples_to_features(examples, tokenizer, args):
             )
         )
     return features
+
+
+def convert_jsonl_to_features(jsonl_path, tokenizer, args, code_field="func", label_field="target", label_default=0):
+    examples = read_jsonl_examples(jsonl_path, code_field=code_field, label_field=label_field, label_default=label_default)
+    return convert_examples_to_features(examples, tokenizer, args)
 
 
 def extract_data(tokenizer, args):

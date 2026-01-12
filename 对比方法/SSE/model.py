@@ -5,6 +5,7 @@ from torch.autograd import Variable
 import copy
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss, BCELoss
+from ParseTOASTPath import AST_VOCAB_SIZE, PAD_ID
 
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
@@ -17,7 +18,7 @@ class RobertaClassificationHead(nn.Module):
         self.out_proj = nn.Linear(config.hidden_size, 1)
         self.sigmoid = nn.Sigmoid()
         self.tanh = nn.Tanh()
-        self.emb = nn.Embedding(44, 768)
+        self.emb = nn.Embedding(AST_VOCAB_SIZE, 768, padding_idx=PAD_ID)
         self.BatchNorm1d = nn.BatchNorm1d(config.hidden_size * 1)
         self.BatchNorm1d2 = nn.BatchNorm1d(config.hidden_size * 2)
         self.lstm1 = nn.LSTM(input_size=768, hidden_size=384, num_layers=1, bias=True, batch_first=True,
@@ -36,7 +37,7 @@ class RobertaClassificationHead(nn.Module):
                 for k, subtree in enumerate(subtrees):
                     for l, path in enumerate(subtree):
                         idx +=1
-                        vec = torch.tensor(path).to('cuda')
+                        vec = torch.tensor(path, device=feature_t.device)
                         vec = self.emb(vec)
                         output, hn = self.GRU(vec)
                         vec = hn.flatten(0)
@@ -71,7 +72,7 @@ class RobertaClassificationHead(nn.Module):
             for k, subtree in enumerate(subtrees):
                 for l, path in enumerate(subtree):
                     idx += 1
-                    vec = torch.tensor(path).to('cuda')
+                    vec = torch.tensor(path, device=feature_s.device)
                     vec = self.emb(vec)
                     output, hn = self.GRU(vec)
                     vec = hn.flatten(0)
