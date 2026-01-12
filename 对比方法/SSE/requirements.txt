@@ -1,0 +1,5 @@
+torch==1.13.0
+tree-sitter==0.20.1
+transformers==4.24.0
+pandas
+tqdm

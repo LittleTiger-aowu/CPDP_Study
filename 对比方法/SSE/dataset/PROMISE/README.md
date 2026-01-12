@@ -1,0 +1,1 @@
+Since the project contains too many files to upload to Github, you can preprocess the data by putting it in dataset/PROMISE/csvs and dataset/PROMISE/projects or visit the following links [https://drive.google.com/drive/folders/14XqBWKb-hgFX8kckwuxyg07-bAXbJTEv?usp=sharing]
