@@ -33,6 +33,7 @@ def resolve_ts_lib_path():
         os.path.join("parser", "my-languages.so"),
         os.path.join("parser", "my-languages.dylib"),
         os.path.join("parser", "my-languages.dll"),
+        os.path.join("..", "..", "src", "evaluators", "build", "my-languages.dll"),
     ]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):

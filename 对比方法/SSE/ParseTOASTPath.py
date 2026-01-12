@@ -15,6 +15,7 @@ def _resolve_library_path(lib_path: Optional[str]) -> str:
         os.path.join(os.path.dirname(__file__), "parser", "my-languages.so"),
         os.path.join(os.path.dirname(__file__), "parser", "my-languages.dylib"),
         os.path.join(os.path.dirname(__file__), "parser", "my-languages.dll"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "src", "evaluators", "build", "my-languages.dll"),
     ]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):
