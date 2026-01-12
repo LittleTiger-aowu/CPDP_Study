@@ -1,4 +1,3 @@
-#src/run_experiment.py
 from __future__ import annotations
 
 import argparse
@@ -8,18 +7,12 @@ import logging
 import os
 import random
 from collections import Counter
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
 import yaml
 import transformers
-# --- 新增代码开始 ---
-# 只有报错才显示，警告全部闭嘴
-transformers.logging.set_verbosity_error()
-import warnings
-warnings.filterwarnings("ignore")
-# --- 新增代码结束 ---
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
 
@@ -27,7 +20,8 @@ from src.data.collate import Collator, CollateConfig
 from src.data.dataset import CPDPDataset
 from src.models.cpdp_model import CPDPModel
 from src.models.lora import apply_lora, LoRALinear
-from src.trainer import CPDPTrainer
+
+transformers.logging.set_verbosity_error()
 
 
 def _resolve_device(device_cfg: str) -> torch.device:
@@ -187,10 +181,198 @@ def _load_tokenizer(model_name: str) -> AutoTokenizer:
         return AutoTokenizer.from_pretrained(model_name, local_files_only=False)
 
 
+def _move_batch(batch: Dict, device: torch.device) -> Dict:
+    moved = {}
+    for k, v in batch.items():
+        moved[k] = v.to(device) if isinstance(v, torch.Tensor) else v
+    return moved
+
+
+def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]:
+    y_pred = (y_score >= 0.5).astype(int)
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+
+    precision = tp / (tp + fp + 1e-12)
+    recall = tp / (tp + fn + 1e-12)
+    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-12)
+    pf = fp / (fp + tn + 1e-12)
+    f1 = 2 * precision * recall / (precision + recall + 1e-12)
+
+    term1 = np.float64(tp + fp)
+    term2 = np.float64(tp + fn)
+    term3 = np.float64(tn + fp)
+    term4 = np.float64(tn + fn)
+    mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
+    mcc = ((tp * tn) - (fp * fn)) / mcc_denom
+
+    order = np.argsort(y_score)
+    ranks = np.empty_like(order)
+    ranks[order] = np.arange(len(y_score)) + 1
+    pos = y_true == 1
+    num_pos = np.sum(pos)
+    num_neg = len(y_true) - num_pos
+    if num_pos == 0 or num_neg == 0:
+        auc = 0.0
+    else:
+        sum_ranks = np.sum(ranks[pos])
+        auc = (sum_ranks - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
+
+    return {
+        "f1": float(f1),
+        "mcc": float(mcc),
+        "auc": float(auc),
+        "precision": float(precision),
+        "recall": float(recall),
+        "accuracy": float(accuracy),
+        "pf": float(pf),
+    }
+
+
+@torch.no_grad()
+def evaluate(model: torch.nn.Module, loader: DataLoader, cfg: Dict, device: torch.device) -> Dict[str, float]:
+    model.eval()
+    label_key = cfg.get("data", {}).get("label_key", "target")
+
+    all_labels = []
+    all_scores = []
+    for batch in loader:
+        batch = _move_batch(batch, device)
+        outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+        logits = outputs["logits"]
+        probs = torch.softmax(logits, dim=1)[:, 1]
+        all_scores.append(probs.detach().cpu().numpy())
+        all_labels.append(batch[label_key].detach().cpu().numpy())
+
+    y_true = np.concatenate(all_labels, axis=0)
+    y_score = np.concatenate(all_scores, axis=0)
+    return _binary_metrics(y_true, y_score)
+
+
+def train_source_only(
+    model: torch.nn.Module,
+    source_loader: DataLoader,
+    valid_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    cfg: Dict,
+    device: torch.device,
+    save_path: str,
+) -> None:
+    train_cfg = cfg.get("train", {})
+    epochs = int(train_cfg.get("epochs", 1))
+    eval_every = max(1, int(train_cfg.get("eval_every_epochs", 1)))
+    early_cfg = train_cfg.get("early_stopping", {})
+    early_enable = bool(early_cfg.get("enable", False))
+    early_patience = int(early_cfg.get("patience", 0))
+    early_metric = str(early_cfg.get("metric", "auc")).lower()
+    save_best = bool(cfg.get("experiment", {}).get("save_best", True))
+    best_metric = float("-inf")
+    patience_counter = 0
+
+    label_key = cfg.get("data", {}).get("label_key", "target")
+    grad_accum_steps = max(1, int(train_cfg.get("grad_accum_steps", 1)))
+    max_grad_norm = float(train_cfg.get("max_grad_norm", 0.0))
+    label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
+    log_every_steps = int(cfg.get("logging", {}).get("log_every_steps", 0))
+    use_bf16 = bool(train_cfg.get("bf16", False))
+    use_fp16 = bool(train_cfg.get("fp16", False))
+
+    class_weights = cfg.get("train", {}).get("class_weights")
+    if class_weights is not None:
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
+        criterion_cls = torch.nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=label_smoothing)
+    else:
+        criterion_cls = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    if cfg.get("model", {}).get("dann", {}).get("enable", False):
+        raise ValueError("Source-only baseline does not allow DANN/CDAN alignment. Disable model.dann.enable.")
+
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    use_amp = torch.cuda.is_available() and (use_bf16 or use_fp16)
+    scaler = torch.cuda.amp.GradScaler() if use_fp16 and torch.cuda.is_available() else None
+
+    for epoch in range(epochs):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        total_loss = 0.0
+        num_steps = 0
+
+        for step_idx, batch in enumerate(source_loader, start=1):
+            batch = _move_batch(batch, device)
+            with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
+                outputs = model(batch, cfg, epoch_idx=epoch, grl_lambda=0.0)
+                logits = outputs["logits"]
+                if "am_logits" in outputs:
+                    loss_cls = criterion_cls(outputs["am_logits"], batch[label_key])
+                else:
+                    loss_cls = criterion_cls(logits, batch[label_key])
+                loss = loss_cls / max(1, grad_accum_steps)
+
+            if scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            if step_idx % grad_accum_steps == 0:
+                if max_grad_norm > 0:
+                    if scaler:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                if scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            total_loss += float(loss.item())
+            num_steps += 1
+            if log_every_steps > 0 and step_idx % log_every_steps == 0:
+                logging.info("Epoch %d step %d loss=%.6f", epoch + 1, step_idx, loss.item())
+
+        if step_idx % grad_accum_steps != 0:
+            if max_grad_norm > 0:
+                if scaler:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            if scaler:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        if eval_every > 0 and (epoch + 1) % eval_every != 0:
+            continue
+
+        metrics = evaluate(model, valid_loader, cfg, device)
+        logging.info(
+            "Epoch %d Valid: F1=%.4f, MCC=%.4f, AUC=%.4f",
+            epoch + 1,
+            metrics["f1"],
+            metrics["mcc"],
+            metrics["auc"],
+        )
+        current_metric = metrics.get(early_metric, metrics.get("auc", 0.0))
+        if current_metric > best_metric:
+            best_metric = current_metric
+            patience_counter = 0
+            if save_best:
+                torch.save(model.state_dict(), save_path)
+        else:
+            patience_counter += 1
+
+        if early_enable and early_patience > 0 and patience_counter >= early_patience:
+            logging.info("Early stopping triggered at epoch %d.", epoch + 1)
+            break
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser("CPDP Experiment Runner")
-    parser.add_argument("--config", type=str, default="src/configs/defaults.yaml")
-    parser.add_argument("--log_path", type=str, default="logs/experiment.log")
+    parser = argparse.ArgumentParser("CodeBERT Naive Transfer (source-only) runner")
+    parser.add_argument("--config", type=str, default="src/configs/naive_transfer_codebert_source_only.yaml")
+    parser.add_argument("--log_path", type=str, default="logs/naive_transfer_codebert_source_only.log")
     parser.add_argument("--project_dir", type=str, required=True)
     args = parser.parse_args()
 
@@ -209,7 +391,6 @@ def main() -> None:
     data_cfg = cfg.get("data", {})
     data_paths = {
         "train_source": data_cfg.get("train_jsonl") or os.path.join(args.project_dir, "train.jsonl"),
-        "train_target": data_cfg.get("target_jsonl") or os.path.join(args.project_dir, "valid_tgt_unlabeled.jsonl"),
         "valid": data_cfg.get("valid_jsonl") or os.path.join(args.project_dir, "valid_src.jsonl"),
         "test": data_cfg.get("test_jsonl") or os.path.join(args.project_dir, "test_tgt.jsonl"),
     }
@@ -218,17 +399,11 @@ def main() -> None:
         logging.error("Please ensure all required JSONL files exist before running.")
         return
 
-    if os.path.abspath(data_paths["train_target"]) == os.path.abspath(data_paths["test"]):
-        logging.error("Target-train and test JSONL paths must differ to avoid leakage.")
-        return
-
     cfg.setdefault("data", {})
     cfg["data"]["train_jsonl"] = data_paths["train_source"]
-    cfg["data"]["target_jsonl"] = data_paths["train_target"]
     cfg["data"]["valid_jsonl"] = data_paths["valid"]
     cfg["data"]["test_jsonl"] = data_paths["test"]
 
-    data_cfg = cfg.get("data", {})
     label_key = data_cfg.get("label_key", "target")
     domain_key = data_cfg.get("domain_key", "domain")
     code_key = data_cfg.get("code_key", "code")
@@ -250,8 +425,6 @@ def main() -> None:
         "test": {
             label_key: "defect label",
         },
-        "train_target": {
-        },
     }
     any_of_keys = {
         name: {"code": code_keys}
@@ -272,10 +445,7 @@ def main() -> None:
             logging.error("JSONL validation failed for %s (%s).", name, path)
             return
 
-    # 1. 从配置(cfg)中读取你在 yaml 里写的路径
     model_path = cfg.get("model", {}).get("encoder", {}).get("pretrained_path", "microsoft/codebert-base")
-
-    # 2. 使用读取到的路径加载 Tokenizer
     tokenizer = _load_tokenizer(model_path)
 
     use_ast = cfg.get("model", {}).get("ast", {}).get("enable", False)
@@ -292,21 +462,6 @@ def main() -> None:
         domain_key_fallbacks=domain_key_fallbacks,
         domain_map=domain_map,
         default_domain_value=0,
-        use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
-        ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
-    )
-    train_target_set = CPDPDataset(
-        data_path=data_paths["train_target"],
-        tokenizer=tokenizer,
-        max_length=max_length,
-        label_key=label_key,
-        domain_key=domain_key,
-        code_key=code_key,
-        code_key_fallbacks=code_key_fallbacks,
-        domain_key_fallbacks=domain_key_fallbacks,
-        domain_map=domain_map,
-        default_domain_value=1,
         use_ast=use_ast,
         ast_cache_dir=ast_cache_dir,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
@@ -385,12 +540,6 @@ def main() -> None:
         sampler=train_sampler,
         **loader_kwargs,
     )
-    train_target_loader = DataLoader(
-        train_target_set,
-        batch_size=batch_size,
-        shuffle=True,
-        **loader_kwargs,
-    )
     valid_loader = DataLoader(
         valid_set,
         batch_size=batch_size,
@@ -426,21 +575,18 @@ def main() -> None:
     )
 
     save_path = os.path.join(output_dir, "best_model.pt")
-    trainer = CPDPTrainer(
+    logging.info("Naive transfer (source-only) training started.")
+    train_source_only(
         model=model,
+        source_loader=train_source_loader,
+        valid_loader=valid_loader,
         optimizer=optimizer,
         cfg=cfg,
         device=device,
         save_path=save_path,
     )
 
-    trainer.train(
-        source_loader=train_source_loader,
-        target_loader=train_target_loader,
-        valid_loader=valid_loader,
-    )
-
-    test_metrics = trainer.evaluate(test_loader)
+    test_metrics = evaluate(model, test_loader, cfg, device)
     logging.info("Final Test Metrics: %s", test_metrics)
 
     exp_cfg = cfg.get("experiment", {})
@@ -468,46 +614,6 @@ def main() -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(results_row)
-
-    if log_cfg.get("save_predictions", False) or log_cfg.get("save_embeddings", False):
-        model.eval()
-        all_probs = []
-        all_labels = []
-        all_embeddings = []
-        with torch.no_grad():
-            for batch in test_loader:
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
-                probs = torch.softmax(outputs["logits"], dim=1)[:, 1]
-                all_probs.append(probs.detach().cpu().numpy())
-                label_key = cfg.get("data", {}).get("label_key", "target")
-                if label_key in batch:
-                    all_labels.append(batch[label_key].detach().cpu().numpy())
-                if log_cfg.get("save_embeddings", False):
-                    emb = outputs.get("features_shared")
-                    if emb is not None:
-                        all_embeddings.append(emb.detach().cpu().numpy())
-
-        if log_cfg.get("save_predictions", False):
-            pred_path = os.path.join(output_dir, "test_predictions.csv")
-            probs_np = np.concatenate(all_probs, axis=0)
-            labels_np = np.concatenate(all_labels, axis=0) if all_labels else None
-            with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
-                writer = csv.writer(pred_file)
-                if labels_np is None:
-                    writer.writerow(["prob"])
-                    for prob in probs_np:
-                        writer.writerow([float(prob)])
-                else:
-                    writer.writerow(["label", "prob"])
-                    for label, prob in zip(labels_np, probs_np):
-                        writer.writerow([int(label), float(prob)])
-            logging.info("Saved predictions to %s", pred_path)
-
-        if log_cfg.get("save_embeddings", False) and all_embeddings:
-            emb_path = os.path.join(output_dir, "test_embeddings.npy")
-            np.save(emb_path, np.concatenate(all_embeddings, axis=0))
-            logging.info("Saved embeddings to %s", emb_path)
 
 
 if __name__ == "__main__":

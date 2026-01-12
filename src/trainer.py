@@ -69,7 +69,7 @@ def _move_batch(batch: Dict, device: torch.device) -> Dict:
 def train_one_epoch(
     model: nn.Module,
     source_loader: DataLoader,
-    target_loader: DataLoader | None,
+    target_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     cfg: Dict,
     device: torch.device,
@@ -107,34 +107,23 @@ def train_one_epoch(
     criterion_dom = nn.CrossEntropyLoss()
 
     # ---【新增 2】计算总步数并包装进度条 ---
-    if target_loader is None:
-        steps = len(source_loader)
-        progress_bar = tqdm(source_loader, total=steps, desc=f"Epoch {epoch_idx + 1}")
-    else:
-        steps = max(len(source_loader), len(target_loader))
-        progress_bar = tqdm(_iter_pairs(source_loader, target_loader), total=steps, desc=f"Epoch {epoch_idx + 1}")
+    steps = max(len(source_loader), len(target_loader))
+    progress_bar = tqdm(_iter_pairs(source_loader, target_loader), total=steps, desc=f"Epoch {epoch_idx + 1}")
 
     # 使用 progress_bar 替代原来的 _iter_pairs(...)
     optimizer.zero_grad(set_to_none=True)
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     use_amp = torch.cuda.is_available() and (use_bf16 or use_fp16)
     scaler = torch.cuda.amp.GradScaler() if use_fp16 and torch.cuda.is_available() else None
-    for batch in progress_bar:
-        if target_loader is None:
-            src_batch = _move_batch(batch, device)
-            tgt_batch = None
-        else:
-            src_batch, tgt_batch = batch
-            src_batch = _move_batch(src_batch, device)
-            tgt_batch = _move_batch(tgt_batch, device)
+    for src_batch, tgt_batch in progress_bar:
+        src_batch = _move_batch(src_batch, device)
+        tgt_batch = _move_batch(tgt_batch, device)
 
         step_idx += 1
 
         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
             src_out = model(src_batch, cfg, epoch_idx=epoch_idx, grl_lambda=grl_lambda)
-            tgt_out = None
-            if tgt_batch is not None:
-                tgt_out = model(tgt_batch, cfg, epoch_idx=epoch_idx, grl_lambda=grl_lambda)
+            tgt_out = model(tgt_batch, cfg, epoch_idx=epoch_idx, grl_lambda=grl_lambda)
 
             src_labels = src_batch[label_key]
             logits = src_out["logits"]
@@ -146,8 +135,6 @@ def train_one_epoch(
 
             loss_dom = torch.tensor(0.0, device=device)
             if use_dann:
-                if tgt_out is None:
-                    raise ValueError("DANN enabled but target_loader is None.")
                 dom_src = src_out["domain_logits"]
                 dom_tgt = tgt_out["domain_logits"]
                 dom_labels_src = torch.zeros(dom_src.size(0), dtype=torch.long, device=device)
@@ -159,7 +146,7 @@ def train_one_epoch(
                 loss_ortho = orthogonal_loss(
                     src_out["features_shared"], src_out["features_private"], mode=ortho_mode
                 )
-                if tgt_out is not None and tgt_out["features_private"] is not None:
+                if tgt_out["features_private"] is not None:
                     loss_ortho = loss_ortho + orthogonal_loss(
                         tgt_out["features_shared"], tgt_out["features_private"], mode=ortho_mode
                     )
@@ -281,7 +268,7 @@ def evaluate(
 def train(
     model: nn.Module,
     source_loader: DataLoader,
-    target_loader: DataLoader | None,
+    target_loader: DataLoader,
     valid_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     cfg: Dict,
@@ -362,7 +349,7 @@ class CPDPTrainer:
     def train(
             self,
             source_loader: DataLoader,
-            target_loader: DataLoader | None,
+            target_loader: DataLoader,
             valid_loader: DataLoader,
     ) -> TrainState:
         return train(
