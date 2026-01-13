@@ -1,0 +1,102 @@
+experiment:
+  project: "cpdp_d4j_file"
+  seed: 2026
+  output_dir: "experiments"
+  run_name: "d4j_file_base"
+  save_best: true
+  device: "cuda"
+  save_path: "experiments/d4j_file_model.pt"
+
+data:
+  train_jsonl: "src/data/cpdp_d4j_Lang_to_Chart/train.jsonl"
+  target_jsonl: "src/data/cpdp_d4j_Lang_to_Chart/test.jsonl"
+  valid_jsonl: "src/data/cpdp_d4j_Lang_to_Chart/valid.jsonl"
+  test_jsonl: "src/data/cpdp_d4j_Lang_to_Chart/test.jsonl"
+  code_key: "code"
+  code_key_fallbacks: ["code"]
+  label_key: "label"
+  domain_key: "domain"
+  num_workers: 4
+  prefetch_factor: 2
+
+file_level:
+  max_len: 384
+  stride: 192
+  max_windows: 16
+  window_pool: "attn"
+  use_structure: false
+  max_methods: 64
+  method_pool: "mean"
+
+model:
+  encoder:
+    name: "codebert"
+    pretrained_path: "microsoft/codebert-base"
+    max_length: 384
+    pooling: "cls"
+    freeze_n_layers: 0
+
+  lora:
+    enable: false
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: ["query", "value"]
+
+  ast:
+    enable: false
+    dim: 128
+    fusion: "concat"
+
+  feature_split:
+    enable: true
+    shared_dim: 256
+    private_dim: 256
+    clf_input: "shared"
+
+  classifier:
+    num_classes: 2
+    loss_type: "am_softmax"
+    am_softmax:
+      margin: 0.35
+      scale: 30.0
+
+  dann:
+    enable: true
+    weight: 0.1
+    grl:
+      lambda_max: 0.5
+      warmup_epochs: 2
+      schedule: "linear"
+    disc:
+      hidden_dim: 128
+      dropout: 0.1
+
+  ortho:
+    enable: true
+    weight: 0.1
+    mode: "corr"
+
+train:
+  epochs: 8
+  batch_size: 8
+  lr: 2.0e-5
+  weight_decay: 0.01
+  grad_accum_steps: 8
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  label_smoothing: 0.0
+  imbalance:
+    enable: true
+    sampler: true
+    loss_weight: true
+  early_stopping:
+    enable: true
+    patience: 5
+    metric: "auc"
+  eval_every_epochs: 1
+
+logging:
+  log_every_steps: 50
+  results_csv: "experiments/d4j_file_results.csv"
