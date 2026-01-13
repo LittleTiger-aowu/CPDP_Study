@@ -195,47 +195,64 @@ def train_one_epoch(
 
 
 def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]:
-    y_pred = (y_score >= 0.5).astype(int)
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    tn = np.sum((y_true == 0) & (y_pred == 0))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
+    """
+    自动在验证集概率上搜索最佳 F1 阈值，并返回对应指标。
+    """
+    from sklearn.metrics import roc_auc_score
 
-    precision = tp / (tp + fp + 1e-12)
-    recall = tp / (tp + fn + 1e-12)
-    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-12)
-    pf = fp / (fp + tn + 1e-12)
-    f1 = 2 * precision * recall / (precision + recall + 1e-12)
-
-    # ---【修复】使用 np.float64 防止整数溢出 ---
-    term1 = np.float64(tp + fp)
-    term2 = np.float64(tp + fn)
-    term3 = np.float64(tn + fp)
-    term4 = np.float64(tn + fn)
-    mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
-    mcc = ((tp * tn) - (fp * fn)) / mcc_denom
-
-    order = np.argsort(y_score)
-    ranks = np.empty_like(order)
-    ranks[order] = np.arange(len(y_score)) + 1
-    pos = y_true == 1
-    num_pos = np.sum(pos)
-    num_neg = len(y_true) - num_pos
+    # 1. 预计算 AUC (AUC 与阈值无关，算一次即可)
+    num_pos = np.sum(y_true == 1)
+    num_neg = np.sum(y_true == 0)
     if num_pos == 0 or num_neg == 0:
         auc = 0.0
     else:
-        sum_ranks = np.sum(ranks[pos])
+        # 使用 argsort 计算 AUC
+        order = np.argsort(y_score)
+        ranks = np.empty_like(order)
+        ranks[order] = np.arange(len(y_score)) + 1
+        sum_ranks = np.sum(ranks[y_true == 1])
         auc = (sum_ranks - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
 
-    return {
-        "f1": float(f1),
-        "mcc": float(mcc),
-        "auc": float(auc),
-        "precision": float(precision),
-        "recall": float(recall),
-        "accuracy": float(accuracy),
-        "pf": float(pf),
-    }
+    # 2. 动态搜索最佳阈值 (0.01 到 0.60，步长 0.01)
+    best_f1 = -1.0
+    best_metrics = {}
+
+    # 跨项目场景下，由于分布偏移，最佳阈值通常偏低 (0.01-0.4 之间)
+    thresholds = np.linspace(0.01, 0.60, 60)
+
+    for th in thresholds:
+        y_pred = (y_score >= th).astype(int)
+        tp = np.sum((y_true == 1) & (y_pred == 1))
+        tn = np.sum((y_true == 0) & (y_pred == 0))
+        fp = np.sum((y_true == 0) & (y_pred == 1))
+        fn = np.sum((y_true == 1) & (y_pred == 0))
+
+        precision = tp / (tp + fp + 1e-12)
+        recall = tp / (tp + fn + 1e-12)
+        f1 = 2 * precision * recall / (precision + recall + 1e-12)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            # 计算当前最佳 F1 下的 MCC
+            term1 = np.float64(tp + fp)
+            term2 = np.float64(tp + fn)
+            term3 = np.float64(tn + fp)
+            term4 = np.float64(tn + fn)
+            mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
+            mcc = ((tp * tn) - (fp * fn)) / mcc_denom
+
+            best_metrics = {
+                "f1": float(f1),
+                "mcc": float(mcc),
+                "auc": float(auc),
+                "precision": float(precision),
+                "recall": float(recall),
+                "accuracy": float((tp + tn) / (len(y_true) + 1e-12)),
+                "pf": float(fp / (fp + tn + 1e-12)),
+                "best_threshold": float(th)  # 记录是在哪个阈值下拿到的
+            }
+
+    return best_metrics
 
 
 @torch.no_grad()
