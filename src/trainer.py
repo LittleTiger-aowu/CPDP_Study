@@ -195,25 +195,9 @@ def train_one_epoch(
 
 
 def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]:
-    y_pred = (y_score >= 0.5).astype(int)
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    tn = np.sum((y_true == 0) & (y_pred == 0))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
-
-    precision = tp / (tp + fp + 1e-12)
-    recall = tp / (tp + fn + 1e-12)
-    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-12)
-    pf = fp / (fp + tn + 1e-12)
-    f1 = 2 * precision * recall / (precision + recall + 1e-12)
-
-    # ---【修复】使用 np.float64 防止整数溢出 ---
-    term1 = np.float64(tp + fp)
-    term2 = np.float64(tp + fn)
-    term3 = np.float64(tn + fp)
-    term4 = np.float64(tn + fn)
-    mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
-    mcc = ((tp * tn) - (fp * fn)) / mcc_denom
+    thresholds = np.linspace(0.01, 0.60, 60)
+    best_f1 = -1.0
+    best_metrics = {}
 
     order = np.argsort(y_score)
     ranks = np.empty_like(order)
@@ -227,15 +211,40 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
         sum_ranks = np.sum(ranks[pos])
         auc = (sum_ranks - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
 
-    return {
-        "f1": float(f1),
-        "mcc": float(mcc),
-        "auc": float(auc),
-        "precision": float(precision),
-        "recall": float(recall),
-        "accuracy": float(accuracy),
-        "pf": float(pf),
-    }
+    for th in thresholds:
+        y_pred = (y_score >= th).astype(int)
+        tp = np.sum((y_true == 1) & (y_pred == 1))
+        tn = np.sum((y_true == 0) & (y_pred == 0))
+        fp = np.sum((y_true == 0) & (y_pred == 1))
+        fn = np.sum((y_true == 1) & (y_pred == 0))
+
+        precision = tp / (tp + fp + 1e-12)
+        recall = tp / (tp + fn + 1e-12)
+        accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-12)
+        pf = fp / (fp + tn + 1e-12)
+        f1 = 2 * precision * recall / (precision + recall + 1e-12)
+
+        term1 = np.float64(tp + fp)
+        term2 = np.float64(tp + fn)
+        term3 = np.float64(tn + fp)
+        term4 = np.float64(tn + fn)
+        mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
+        mcc = ((tp * tn) - (fp * fn)) / mcc_denom
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_metrics = {
+                "f1": float(f1),
+                "mcc": float(mcc),
+                "auc": float(auc),
+                "precision": float(precision),
+                "recall": float(recall),
+                "accuracy": float(accuracy),
+                "pf": float(pf),
+                "best_threshold": float(th),
+            }
+
+    return best_metrics
 
 
 @torch.no_grad()

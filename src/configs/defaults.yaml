@@ -52,7 +52,7 @@ model:
     enable: true                         # 是否启用特征解耦
     shared_dim: 256                      # 共享特征维度（跨域知识）
     private_dim: 256                     # 私有特征维度（域特定知识）
-    clf_input: "shared"                  # 分类器输入："shared"(共享特征) | "private"(私有特征) | "concat"(拼接)
+    clf_input: "concat"                  # 分类器输入："shared"(共享特征) | "private"(私有特征) | "concat"(拼接)
 
   # 分类器配置
   classifier:
@@ -65,10 +65,10 @@ model:
   # 域对抗网络配置
   dann:
     enable: true                         # 是否启用域对抗网络
-    weight: 0.1                          # 域对抗损失权重（0.1为较稳定起点）
+    weight: 0.05                         # 域对抗损失权重（0.1为较稳定起点）
     grl:                                 # 梯度反转层配置
       lambda_max: 0.5                    # 梯度反转强度上限
-      warmup_epochs: 2                   # 预热轮数（前几轮专注学习缺陷检测，之后再进行域对齐）
+      warmup_epochs: 4                   # 预热轮数（前几轮专注学习缺陷检测，之后再进行域对齐）
       schedule: "linear"                 # 强度调度策略："linear"线性增长
     disc:                                # 域判别器配置
       hidden_dim: 128                    # 判别器隐藏层维度
