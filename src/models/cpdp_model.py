@@ -249,7 +249,7 @@ class CPDPModel(nn.Module):
             # 【修改点 3】使用 Cross Attention 融合
             if self.ast_fusion == "cross_attention":
                 # 替代原来的 torch.cat，使用 Cross Attention 融合
-                merged_feat = self.fusion_module(code_seq, ast_feat)  # -> [B, 256]
+                merged_feat = self.fusion_module(code_seq, ast_feat, code_attentions)  # -> [B, 256]
             elif self.ast_fusion == "concat":
                 merged_feat = torch.cat([code_pooled, ast_feat], dim=-1)
             elif self.ast_fusion == "sum":

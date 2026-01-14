@@ -93,6 +93,14 @@ class CPDPDataset(Dataset):
 
         logger.info(f"Loaded {len(self.data)} samples.")
 
+    def _clean_code(self, code: str) -> str:
+        # 参考 LineVul 的处理：移除多余的换行和特殊字符，保留语义结构
+        # 1. 移除特殊不可见字符 (除了换行)
+        code = "".join([c for c in code if c.isprintable() or c in ['\n', '\t', '\r']])
+        # 2. 简单的空格规范化 (可选，取决于你的原始数据质量)
+        # code = " ".join(code.split()) 
+        return code
+
     def _get_code_text(self, item: Dict[str, Any]) -> str:
         for key in self.code_keys:
             if key in item:
@@ -100,7 +108,8 @@ class CPDPDataset(Dataset):
                 if value is None:
                     continue
                 if isinstance(value, str):
-                    return value
+                    # 对代码进行清洗
+                    return self._clean_code(value)
                 return str(value)
         return ""
 
