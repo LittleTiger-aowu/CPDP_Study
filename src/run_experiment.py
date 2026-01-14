@@ -187,6 +187,40 @@ def _load_tokenizer(model_name: str) -> AutoTokenizer:
         return AutoTokenizer.from_pretrained(model_name, local_files_only=False)
 
 
+def _summarize_scores(probs: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+    probs = probs.astype(float)
+    labels = labels.astype(int)
+    pos_mask = labels == 1
+    neg_mask = labels == 0
+    summary = {
+        "mean": float(np.mean(probs)) if probs.size > 0 else float("nan"),
+        "std": float(np.std(probs)) if probs.size > 0 else float("nan"),
+        "p50": float(np.percentile(probs, 50)) if probs.size > 0 else float("nan"),
+        "p90": float(np.percentile(probs, 90)) if probs.size > 0 else float("nan"),
+        "p99": float(np.percentile(probs, 99)) if probs.size > 0 else float("nan"),
+        "pos_mean": float(np.mean(probs[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "neg_mean": float(np.mean(probs[neg_mask])) if np.any(neg_mask) else float("nan"),
+    }
+    return summary
+
+
+def _save_score_artifacts(output_dir: str, probs: np.ndarray, labels: np.ndarray) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    scores_path = os.path.join(output_dir, "test_scores.csv")
+    with open(scores_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["label", "p_defect"])
+        for label, prob in zip(labels, probs):
+            writer.writerow([int(label), float(prob)])
+    stats = _summarize_scores(probs, labels)
+    stats_path = os.path.join(output_dir, "test_score_stats.csv")
+    with open(stats_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        for key, value in stats.items():
+            writer.writerow([key, value])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser("CPDP Experiment Runner")
     parser.add_argument("--config", type=str, default="src/configs/defaults.yaml")
@@ -442,6 +476,24 @@ def main() -> None:
 
     test_metrics = trainer.evaluate(test_loader)
     logging.info("Final Test Metrics: %s", test_metrics)
+
+    model.eval()
+    all_probs = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+            probs = torch.softmax(outputs["logits"], dim=1)[:, 1]
+            all_probs.append(probs.detach().cpu().numpy())
+            label_key = cfg.get("data", {}).get("label_key", "target")
+            if label_key in batch:
+                all_labels.append(batch[label_key].detach().cpu().numpy())
+
+    if all_probs and all_labels:
+        probs_np = np.concatenate(all_probs, axis=0)
+        labels_np = np.concatenate(all_labels, axis=0)
+        _save_score_artifacts(output_dir, probs_np, labels_np)
 
     exp_cfg = cfg.get("experiment", {})
     exp_name = exp_cfg.get("run_name") or os.path.splitext(os.path.basename(args.config))[0]
