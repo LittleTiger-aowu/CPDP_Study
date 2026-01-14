@@ -278,6 +278,8 @@ class CPDPDataset(Dataset):
             self.label_key: int(item.get(self.label_key, 0)),
             self.domain_key: self._get_domain_value(item),
             "loc": loc,
+            "unit_id": item.get("idx", item.get("unit_id")),
+            "project": item.get("project"),
         }
 
         # 兼容 RoBERTa (没有 token_type_ids) 和 BERT (有)

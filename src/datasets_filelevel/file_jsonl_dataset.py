@@ -102,6 +102,7 @@ class FileJsonlDataset(Dataset):
             "domain": domain_value,
             "unit_id": item.get("unit_id"),
             "loc": loc,
+            "project": item.get("project"),
         }
         if "methods" in item:
             sample["methods"] = item["methods"]

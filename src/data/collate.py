@@ -225,6 +225,10 @@ class Collator:
                 [float(s["loc"]) for s in samples],
                 dtype=torch.float32
             )
+        if _check_key_consistency(samples, "unit_id"):
+            batch["unit_id"] = [s["unit_id"] for s in samples]
+        if _check_key_consistency(samples, "project"):
+            batch["project"] = [s["project"] for s in samples]
 
         # -------------------------
         # 3. AST 图结构 (Disjoint Union)
