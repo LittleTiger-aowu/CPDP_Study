@@ -252,6 +252,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="src/configs/defaults.yaml")
     parser.add_argument("--log_path", type=str, default="logs/experiment.log")
     parser.add_argument("--project_dir", type=str, required=True)
+    parser.add_argument("--ast_cache_dir", type=str, default=None, help="AST cache directory. If not provided, will look for cache subdirectory in project_dir")
     args = parser.parse_args()
 
     setup_logging(args.log_path)
@@ -265,6 +266,27 @@ def main() -> None:
     logging.info("Using device: %s", device)
     output_dir = _resolve_output_dir(cfg, args.project_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    # 如果命令行提供了ast_cache_dir，则使用它，否则在项目目录下查找cache子目录
+    ast_cache_dir = args.ast_cache_dir
+    if not ast_cache_dir:
+        # 尝试在项目目录下查找cache子目录
+        possible_cache_dirs = [
+            os.path.join(args.project_dir, "cache"),
+            os.path.join(args.project_dir, "ast_cache"),
+            os.path.join(args.project_dir, "data", "ast_cache")
+        ]
+        for cache_dir in possible_cache_dirs:
+            if os.path.exists(cache_dir):
+                ast_cache_dir = cache_dir
+                logging.info("Found AST cache directory: %s", ast_cache_dir)
+                break
+        else:
+            # 如果没找到，使用配置文件中的设置
+            ast_cache_dir = cfg.get("data", {}).get("ast_cache_dir")
+            logging.info("Using AST cache directory from config: %s", ast_cache_dir)
+    else:
+        logging.info("Using AST cache directory from command line: %s", ast_cache_dir)
 
     data_cfg = cfg.get("data", {})
     data_paths = {
@@ -296,7 +318,8 @@ def main() -> None:
     domain_key_fallbacks = data_cfg.get("domain_key_fallbacks", [])
     domain_map = data_cfg.get("domain_map", None)
     domain_key_required = bool(data_cfg.get("domain_key_required", False))
-    ast_cache_dir = data_cfg.get("ast_cache_dir")
+    # 优先使用命令行参数，然后是配置文件
+    ast_cache_dir_final = ast_cache_dir or data_cfg.get("ast_cache_dir")
     ast_cache_fallback_to_jsonl = bool(data_cfg.get("ast_cache_fallback_to_jsonl", True))
     code_keys = [code_key] + [k for k in code_key_fallbacks if k != code_key]
 
@@ -353,7 +376,7 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=0,
         use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
+        ast_cache_dir=ast_cache_dir_final,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     train_target_set = CPDPDataset(
@@ -368,7 +391,7 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=1,
         use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
+        ast_cache_dir=ast_cache_dir_final,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     valid_set = CPDPDataset(
@@ -383,7 +406,7 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=0,
         use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
+        ast_cache_dir=ast_cache_dir_final,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
     test_set = CPDPDataset(
@@ -398,7 +421,7 @@ def main() -> None:
         domain_map=domain_map,
         default_domain_value=1,
         use_ast=use_ast,
-        ast_cache_dir=ast_cache_dir,
+        ast_cache_dir=ast_cache_dir_final,
         ast_cache_fallback_to_jsonl=ast_cache_fallback_to_jsonl,
     )
 
@@ -579,7 +602,7 @@ def main() -> None:
             "seed": seed,
             "best_threshold": best_threshold,
             "output_dir": output_dir,
-            "git_sha": git_sha,
+            "git_tag": git_sha,
         }
         _write_metadata(output_dir, metadata)
 

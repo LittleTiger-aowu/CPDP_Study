@@ -94,7 +94,8 @@ class CodeBertEncoder(nn.Module):
         # 2. 构造输入与鲁棒调用 (Enhanced Retry)
         inputs = {
             "input_ids": input_ids,
-            "attention_mask": attention_mask
+            "attention_mask": attention_mask,
+            "output_attentions": True  # 输出注意力权重
         }
 
         if token_type_ids is not None:
@@ -106,6 +107,8 @@ class CodeBertEncoder(nn.Module):
             # 仅当输入包含 token_type_ids 时才尝试重试
             if "token_type_ids" in inputs:
                 del inputs["token_type_ids"]
+                # 更新参数也移除 output_attentions
+                inputs["output_attentions"] = True
                 try:
                     outputs = self.model(**inputs)
                 except TypeError as retry_err:
@@ -123,6 +126,8 @@ class CodeBertEncoder(nn.Module):
                 raise first_err
 
         last_hidden_state = outputs.last_hidden_state
+        # 获取 Attention 权重
+        attentions = outputs.attentions if hasattr(outputs, 'attentions') else None
 
         # 3. 池化策略
         if self.pooling == "cls":
@@ -139,4 +144,13 @@ class CodeBertEncoder(nn.Module):
         # 4. Dropout
         pooled_output = self.dropout(pooled_output)
 
-        return pooled_output
+        # 【修改点】同时返回 序列特征、池化特征和注意力权重
+        result = {
+            "pooled": pooled_output,       # [B, 768]
+            "sequence": last_hidden_state  # [B, Seq, 768]
+        }
+        
+        if attentions is not None:
+            result["attentions"] = attentions  # [num_layers, batch, num_heads, seq_len, seq_len]
+        
+        return result

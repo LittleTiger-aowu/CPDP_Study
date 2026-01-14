@@ -16,9 +16,9 @@ class FeatureSplit(nn.Module):
     结构:
     Input [B, in_dim]
        |
-       +--> Linear -> Activation -> Dropout -> Shared [B, shared_dim]
+       +--> Shared Encoder (双层MLP+BN) -> Shared [B, shared_dim]
        |
-       +--> Linear -> Activation -> Dropout -> Private [B, private_dim]
+       +--> Private Encoder (双层MLP+BN) -> Private [B, private_dim]
     """
 
     def __init__(
@@ -26,8 +26,7 @@ class FeatureSplit(nn.Module):
             in_dim: int,
             shared_dim: int,
             private_dim: int,
-            dropout: float = 0.1,
-            activation: str = "gelu"
+            dropout: float = 0.1
     ):
         """
         Args:
@@ -35,7 +34,6 @@ class FeatureSplit(nn.Module):
             shared_dim: 共享特征空间维度.
             private_dim: 私有特征空间维度.
             dropout: 投影后的 Dropout 概率.
-            activation: 激活函数类型 ('gelu', 'relu', 'tanh').
         """
         super().__init__()
 
@@ -43,36 +41,40 @@ class FeatureSplit(nn.Module):
         self.shared_dim = shared_dim
         self.private_dim = private_dim
 
-        # 1. 共享特征投影层
-        self.shared_proj = nn.Linear(in_dim, shared_dim)
+        # 1. 共享特征编码器 - 双层MLP + BatchNorm + ReLU
+        self.shared_enc = nn.Sequential(
+            nn.Linear(in_dim, shared_dim),
+            nn.BatchNorm1d(shared_dim),  # 关键：使用BN稳定训练
+            nn.ReLU(),                   # 使用ReLU激活
+            nn.Linear(shared_dim, shared_dim),  # 第二层增加非线性能力
+            nn.Dropout(dropout)          # 保留Dropout防过拟合
+        )
 
-        # 2. 私有特征投影层
-        self.private_proj = nn.Linear(in_dim, private_dim)
+        # 2. 私有特征编码器 - 双层MLP + BatchNorm + ReLU
+        self.private_enc = nn.Sequential(
+            nn.Linear(in_dim, private_dim),
+            nn.BatchNorm1d(private_dim),
+            nn.ReLU(),
+            nn.Linear(private_dim, private_dim),
+            nn.Dropout(dropout)
+        )
 
-        # 3. 公共组件
-        self.dropout = nn.Dropout(dropout)
-
-        # 激活函数选择
-        act_lower = activation.lower()
-        if act_lower == "gelu":
-            self.act = nn.GELU()
-        elif act_lower == "relu":
-            self.act = nn.ReLU()
-        elif act_lower == "tanh":
-            self.act = nn.Tanh()
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
-
-        # 4. 权重初始化 (Xavier Uniform)
+        # 3. 权重初始化 (Xavier Uniform)
         self._init_weights()
 
     def _init_weights(self):
         """应用 Xavier 初始化以加速收敛"""
-        nn.init.xavier_uniform_(self.shared_proj.weight)
-        nn.init.zeros_(self.shared_proj.bias)
+        # 初始化共享编码器权重
+        nn.init.xavier_uniform_(self.shared_enc[0].weight)
+        nn.init.zeros_(self.shared_enc[0].bias)
+        nn.init.xavier_uniform_(self.shared_enc[3].weight)
+        nn.init.zeros_(self.shared_enc[3].bias)
 
-        nn.init.xavier_uniform_(self.private_proj.weight)
-        nn.init.zeros_(self.private_proj.bias)
+        # 初始化私有编码器权重
+        nn.init.xavier_uniform_(self.private_enc[0].weight)
+        nn.init.zeros_(self.private_enc[0].bias)
+        nn.init.xavier_uniform_(self.private_enc[3].weight)
+        nn.init.zeros_(self.private_enc[3].bias)
 
     def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         """
@@ -93,14 +95,8 @@ class FeatureSplit(nn.Module):
         if x.size(-1) != self.in_dim:
             raise ValueError(f"FeatureSplit expects input dim {self.in_dim}, got {x.size(-1)}.")
 
-        # 2. 共享分支计算
-        h_s = self.shared_proj(x)
-        h_s = self.act(h_s)
-        h_s = self.dropout(h_s)
-
-        # 3. 私有分支计算
-        h_p = self.private_proj(x)
-        h_p = self.act(h_p)
-        h_p = self.dropout(h_p)
+        # 2. 共享和私有特征提取
+        h_s = self.shared_enc(x)
+        h_p = self.private_enc(x)
 
         return h_s, h_p

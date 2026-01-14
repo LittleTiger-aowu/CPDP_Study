@@ -14,6 +14,7 @@ try:
     from src.models.feature_split import FeatureSplit
     from src.models.classifier import ClassifierHead
     from src.models.domain_disc import DomainDiscriminator
+    from src.models.fusion import CrossModalFusion  # 新增导入
 except ImportError as e:
     raise ImportError(f"CPDPModel 缺少必要子模块，请检查 src/models/ 目录是否完整: {e}")
 
@@ -82,14 +83,25 @@ class CPDPModel(nn.Module):
             ast_dim = ast_cfg.get("dim", 128)
             # ASTEncoder 内部根据 out_dim 初始化 GNN/MLP
             self.ast_encoder = ASTEncoder(out_dim=ast_dim)
-
-            if self.ast_fusion == "concat":
-                current_dim += ast_dim
-            elif self.ast_fusion == "sum":
-                if current_dim != ast_dim:
-                    raise ValueError(f"AST fusion 'sum' requires dim match: Code({current_dim}) vs AST({ast_dim})")
+            
+            # 【修改点 1】初始化 Fusion 模块
+            # 当使用 cross_attention 融合时，融合后的维度等于 fusion_dim
+            if self.ast_fusion == "cross_attention":
+                self.fusion_dim = ast_cfg.get("fusion_dim", 256)
+                self.fusion_module = CrossModalFusion(
+                    semantic_dim=self.code_dim,       # CodeBERT 维度
+                    struct_dim=ast_dim, 
+                    hidden_dim=self.fusion_dim
+                )
+                current_dim = self.fusion_dim  # 更新当前特征维度
             else:
-                raise ValueError(f"Unknown AST fusion mode: {self.ast_fusion}")
+                if self.ast_fusion == "concat":
+                    current_dim += ast_dim
+                elif self.ast_fusion == "sum":
+                    if current_dim != ast_dim:
+                        raise ValueError(f"AST fusion 'sum' requires dim match: Code({current_dim}) vs AST({ast_dim})")
+                else:
+                    raise ValueError(f"Unknown AST fusion mode: {self.ast_fusion}")
 
         # 3. 特征解耦 (Feature Split)
         # -----------------------------------------------------------
@@ -198,13 +210,18 @@ class CPDPModel(nn.Module):
         if "input_ids" not in batch or "attention_mask" not in batch:
             raise KeyError("Batch missing 'input_ids' or 'attention_mask'.")
 
-        code_feat = self.code_encoder(
+        code_out = self.code_encoder(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             token_type_ids=batch.get("token_type_ids", None)
         )
+        
+        # 【修改点 2】解包，获取序列特征和注意力权重
+        code_seq = code_out["sequence"]  # [B, Seq, 768]
+        code_pooled = code_out["pooled"]  # [B, 768]
+        code_attentions = code_out.get("attentions", None)  # 可能为 None
 
-        merged_feat = code_feat
+        merged_feat = code_pooled
 
         # 2. AST 编码与融合 (Route B 实现)
         if self.use_ast:
@@ -228,11 +245,15 @@ class CPDPModel(nn.Module):
                 batch=batch["ast_batch"],
                 batch_size=current_bs  # <--- 必须加这个，防止末尾空图导致崩坏
             )
-
-            if self.ast_fusion == "concat":
-                merged_feat = torch.cat([code_feat, ast_feat], dim=-1)
+            
+            # 【修改点 3】使用 Cross Attention 融合
+            if self.ast_fusion == "cross_attention":
+                # 替代原来的 torch.cat，使用 Cross Attention 融合
+                merged_feat = self.fusion_module(code_seq, ast_feat)  # -> [B, 256]
+            elif self.ast_fusion == "concat":
+                merged_feat = torch.cat([code_pooled, ast_feat], dim=-1)
             elif self.ast_fusion == "sum":
-                merged_feat = code_feat + ast_feat
+                merged_feat = code_pooled + ast_feat
 
         # 3. 特征解耦
         if self.use_split:
