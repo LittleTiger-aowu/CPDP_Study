@@ -191,13 +191,16 @@ def _load_tokenizer(model_name: str) -> AutoTokenizer:
 def _summarize_scores(
     probs: np.ndarray,
     labels: np.ndarray,
-    logits: np.ndarray,
+    logit1: np.ndarray,
+    logit0: np.ndarray,
 ) -> Dict[str, float]:
     probs = probs.astype(float)
     labels = labels.astype(int)
-    logits = logits.astype(float)
+    logit1 = logit1.astype(float)
+    logit0 = logit0.astype(float)
     pos_mask = labels == 1
     neg_mask = labels == 0
+    margin = logit1 - logit0
     return {
         "prob_mean": float(np.mean(probs)) if probs.size > 0 else float("nan"),
         "prob_std": float(np.std(probs)) if probs.size > 0 else float("nan"),
@@ -206,13 +209,17 @@ def _summarize_scores(
         "prob_p99": float(np.percentile(probs, 99)) if probs.size > 0 else float("nan"),
         "prob_pos_mean": float(np.mean(probs[pos_mask])) if np.any(pos_mask) else float("nan"),
         "prob_neg_mean": float(np.mean(probs[neg_mask])) if np.any(neg_mask) else float("nan"),
-        "logit_mean": float(np.mean(logits)) if logits.size > 0 else float("nan"),
-        "logit_std": float(np.std(logits)) if logits.size > 0 else float("nan"),
-        "logit_p50": float(np.percentile(logits, 50)) if logits.size > 0 else float("nan"),
-        "logit_p90": float(np.percentile(logits, 90)) if logits.size > 0 else float("nan"),
-        "logit_p99": float(np.percentile(logits, 99)) if logits.size > 0 else float("nan"),
-        "logit_pos_mean": float(np.mean(logits[pos_mask])) if np.any(pos_mask) else float("nan"),
-        "logit_neg_mean": float(np.mean(logits[neg_mask])) if np.any(neg_mask) else float("nan"),
+        "logit_mean": float(np.mean(logit1)) if logit1.size > 0 else float("nan"),
+        "logit_std": float(np.std(logit1)) if logit1.size > 0 else float("nan"),
+        "logit_p50": float(np.percentile(logit1, 50)) if logit1.size > 0 else float("nan"),
+        "logit_p90": float(np.percentile(logit1, 90)) if logit1.size > 0 else float("nan"),
+        "logit_p99": float(np.percentile(logit1, 99)) if logit1.size > 0 else float("nan"),
+        "logit_pos_mean": float(np.mean(logit1[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "logit_neg_mean": float(np.mean(logit1[neg_mask])) if np.any(neg_mask) else float("nan"),
+        "margin_mean": float(np.mean(margin)) if margin.size > 0 else float("nan"),
+        "margin_p50": float(np.percentile(margin, 50)) if margin.size > 0 else float("nan"),
+        "margin_p90": float(np.percentile(margin, 90)) if margin.size > 0 else float("nan"),
+        "margin_p99": float(np.percentile(margin, 99)) if margin.size > 0 else float("nan"),
     }
 
 
@@ -221,7 +228,8 @@ def _save_score_artifacts(
     rows: List[Dict[str, object]],
     probs: np.ndarray,
     labels: np.ndarray,
-    logits: np.ndarray,
+    logit0: np.ndarray,
+    logit1: np.ndarray,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     scores_path = os.path.join(output_dir, "test_scores.csv")
@@ -231,7 +239,7 @@ def _save_score_artifacts(
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
-    stats = _summarize_scores(probs, labels, logits)
+    stats = _summarize_scores(probs, labels, logit1, logit0)
     stats_path = os.path.join(output_dir, "test_score_stats.csv")
     with open(stats_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -506,7 +514,8 @@ def main() -> None:
     model.eval()
     all_probs = []
     all_labels = []
-    all_logits = []
+    all_logit0 = []
+    all_logit1 = []
     all_prob0 = []
     all_unit_ids = []
     all_projects = []
@@ -522,7 +531,8 @@ def main() -> None:
             prob0 = probs[:, 0]
             all_probs.append(prob1.detach().cpu().numpy())
             all_prob0.append(prob0.detach().cpu().numpy())
-            all_logits.append(logits[:, 1].detach().cpu().numpy())
+            all_logit0.append(logits[:, 0].detach().cpu().numpy())
+            all_logit1.append(logits[:, 1].detach().cpu().numpy())
             label_key = cfg.get("data", {}).get("label_key", "target")
             if label_key in batch:
                 all_labels.append(batch[label_key].detach().cpu().numpy())
@@ -542,12 +552,13 @@ def main() -> None:
     if all_probs and all_labels:
         probs_np = np.concatenate(all_probs, axis=0)
         labels_np = np.concatenate(all_labels, axis=0)
-        logits_np = np.concatenate(all_logits, axis=0)
+        logit0_np = np.concatenate(all_logit0, axis=0)
+        logit1_np = np.concatenate(all_logit1, axis=0)
         prob0_np = np.concatenate(all_prob0, axis=0)
         best_threshold = float(test_metrics.get("best_threshold", 0.5))
         rows = []
         for idx, (label, prob1, prob0, logit) in enumerate(
-            zip(labels_np, probs_np, prob0_np, logits_np)
+            zip(labels_np, probs_np, prob0_np, logit1_np)
         ):
             row = {
                 "idx": all_unit_ids[idx],
@@ -555,6 +566,8 @@ def main() -> None:
                 "prob": float(prob1),
                 "prob0": float(prob0),
                 "logit": float(logit),
+                "logit0": float(logit0_np[idx]),
+                "logit1": float(logit1_np[idx]),
                 "pred_0p5": int(prob1 >= 0.5),
                 "pred_best": int(prob1 >= best_threshold),
                 "domain": all_domains[idx],
@@ -563,7 +576,7 @@ def main() -> None:
                 "loc": float(all_locs[idx]),
             }
             rows.append(row)
-        _save_score_artifacts(output_dir, rows, probs_np, labels_np, logits_np)
+        _save_score_artifacts(output_dir, rows, probs_np, labels_np, logit0_np, logit1_np)
         score_rows = rows
 
         git_sha = None
