@@ -220,6 +220,12 @@ class Collator:
                 dtype=torch.long
             )
 
+        if _check_key_consistency(samples, "loc"):
+            batch["loc"] = torch.tensor(
+                [float(s["loc"]) for s in samples],
+                dtype=torch.float32
+            )
+
         # -------------------------
         # 3. AST 图结构 (Disjoint Union)
         # -------------------------
