@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple, Iterator
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Tuple, Iterator, List
+import time
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -17,6 +19,7 @@ from src.losses.orthogonal import orthogonal_loss
 class TrainState:
     best_f1: float = 0.0
     best_mcc: float = 0.0
+    history: List[Dict[str, float]] = field(default_factory=list)
 
 
 def compute_grl_lambda(epoch_idx: int, cfg: Dict) -> float:
@@ -301,11 +304,14 @@ def train(
     early_metric = str(early_cfg.get("metric", "auc")).lower()
     save_best = bool(cfg.get("experiment", {}).get("save_best", True))
     state = TrainState()
+    history: List[Dict[str, float]] = []
     best_metric = float("-inf")
     patience_counter = 0
 
     for epoch in range(epochs):
-        train_one_epoch(
+        epoch_start = time.time()
+        epoch_start_ts = datetime.now().isoformat(timespec="seconds")
+        train_loss = train_one_epoch(
             model=model,
             source_loader=source_loader,
             target_loader=target_loader,
@@ -314,8 +320,22 @@ def train(
             device=device,
             epoch_idx=epoch,
         )
+        epoch_end_ts = datetime.now().isoformat(timespec="seconds")
+        epoch_time = time.time() - epoch_start
+        lr = float(optimizer.param_groups[0].get("lr", 0.0)) if optimizer.param_groups else 0.0
+        grl_lambda = compute_grl_lambda(epoch, cfg)
+        record = {
+            "epoch": epoch + 1,
+            "epoch_start_time": epoch_start_ts,
+            "epoch_end_time": epoch_end_ts,
+            "train_loss": float(train_loss),
+            "epoch_time_sec": float(epoch_time),
+            "grl_lambda": float(grl_lambda),
+            "lr": float(lr),
+        }
 
         if eval_every > 0 and (epoch + 1) % eval_every != 0:
+            history.append(record)
             continue
 
         metrics = evaluate(model, valid_loader, cfg, device)
@@ -341,10 +361,27 @@ def train(
 
         if improved and not save_best:
             torch.save(model.state_dict(), save_path)
+        record.update(
+            {
+                "val_f1": float(metrics.get("f1", 0.0)),
+                "val_mcc": float(metrics.get("mcc", 0.0)),
+                "val_auc": float(metrics.get("auc", 0.0)),
+                "val_precision": float(metrics.get("precision", 0.0)),
+                "val_recall": float(metrics.get("recall", 0.0)),
+                "val_accuracy": float(metrics.get("accuracy", 0.0)),
+                "val_pf": float(metrics.get("pf", 0.0)),
+                "val_best_threshold": float(metrics.get("best_threshold", 0.0)),
+                "best_f1_so_far": float(state.best_f1),
+                "best_mcc_so_far": float(state.best_mcc),
+            }
+        )
+        history.append(record)
+
         if early_enable and early_patience > 0 and patience_counter >= early_patience:
             logging.info("Early stopping triggered at epoch %d.", epoch + 1)
             break
 
+    state.history = history
     return state
 
 
