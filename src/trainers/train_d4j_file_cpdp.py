@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import random
+import time
+import subprocess
 from collections import Counter
+from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
 import numpy as np
@@ -111,17 +115,126 @@ def _save_metrics_csv(path: str, metrics: Dict[str, float]) -> None:
             writer.writerow([key, value])
 
 
+def _save_epoch_metrics_csv(path: str, history: List[Dict[str, float]]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not history:
+        return
+    fieldnames = [
+        "epoch",
+        "epoch_start_time",
+        "epoch_end_time",
+        "train_loss",
+        "epoch_time_sec",
+        "grl_lambda",
+        "lr",
+        "val_f1",
+        "val_mcc",
+        "val_auc",
+        "val_pr_auc",
+        "val_precision",
+        "val_recall",
+        "val_balanced_acc",
+        "val_g_mean",
+        "val_accuracy",
+        "val_pf",
+        "val_best_threshold",
+        "val_recall_at_20_effort",
+        "val_precision_at_20_effort",
+        "best_f1_so_far",
+        "best_mcc_so_far",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+
+def _summarize_scores(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    logits: np.ndarray,
+) -> Dict[str, float]:
+    probs = probs.astype(float)
+    labels = labels.astype(int)
+    logits = logits.astype(float)
+    pos_mask = labels == 1
+    neg_mask = labels == 0
+    return {
+        "prob_mean": float(np.mean(probs)) if probs.size > 0 else float("nan"),
+        "prob_std": float(np.std(probs)) if probs.size > 0 else float("nan"),
+        "prob_p50": float(np.percentile(probs, 50)) if probs.size > 0 else float("nan"),
+        "prob_p90": float(np.percentile(probs, 90)) if probs.size > 0 else float("nan"),
+        "prob_p99": float(np.percentile(probs, 99)) if probs.size > 0 else float("nan"),
+        "prob_pos_mean": float(np.mean(probs[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "prob_neg_mean": float(np.mean(probs[neg_mask])) if np.any(neg_mask) else float("nan"),
+        "logit_mean": float(np.mean(logits)) if logits.size > 0 else float("nan"),
+        "logit_std": float(np.std(logits)) if logits.size > 0 else float("nan"),
+        "logit_p50": float(np.percentile(logits, 50)) if logits.size > 0 else float("nan"),
+        "logit_p90": float(np.percentile(logits, 90)) if logits.size > 0 else float("nan"),
+        "logit_p99": float(np.percentile(logits, 99)) if logits.size > 0 else float("nan"),
+        "logit_pos_mean": float(np.mean(logits[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "logit_neg_mean": float(np.mean(logits[neg_mask])) if np.any(neg_mask) else float("nan"),
+    }
+
+
+def _save_score_artifacts(
+    run_dir: str,
+    rows: List[Dict[str, object]],
+    probs: np.ndarray,
+    labels: np.ndarray,
+    logits: np.ndarray,
+) -> None:
+    os.makedirs(run_dir, exist_ok=True)
+    scores_path = os.path.join(run_dir, "test_scores.csv")
+    if rows:
+        fieldnames = list(rows[0].keys())
+        with open(scores_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    stats = _summarize_scores(probs, labels, logits)
+    stats_path = os.path.join(run_dir, "test_score_stats.csv")
+    with open(stats_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        for key, value in stats.items():
+            writer.writerow([key, value])
+
+
+def _write_metadata(run_dir: str, payload: Dict[str, object]) -> None:
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "metadata.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _create_run_dir(exp_cfg: Dict[str, Any]) -> str:
+    output_dir = exp_cfg.get("output_dir", "experiments")
+    run_name = exp_cfg.get("run_name", "run")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(output_dir, f"{run_name}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser("Train Defects4J file-level CPDP")
     parser.add_argument("--config", type=str, default="src/configs/d4j_file/base.yaml")
     parser.add_argument("--log_path", type=str, default="logs/d4j_file_cpdp.log")
     args = parser.parse_args()
 
-    setup_logging(args.log_path)
     cfg = load_yaml(args.config)
     exp_cfg = cfg.get("experiment", {})
     data_cfg = cfg.get("data", {})
     file_cfg = cfg.get("file_level", {})
+
+    run_dir = _create_run_dir(exp_cfg)
+    log_path = os.path.join(run_dir, os.path.basename(args.log_path))
+    setup_logging(log_path)
+    config_snapshot = os.path.join(run_dir, "config.yaml")
+    with open(config_snapshot, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
 
     set_seed(int(exp_cfg.get("seed", 2026)))
     device = _resolve_device(exp_cfg.get("device", "auto"))
@@ -237,16 +350,110 @@ def main() -> None:
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
 
-    save_path = exp_cfg.get("save_path", "experiments/file_level_model.pt")
+    save_path_cfg = exp_cfg.get("save_path", "experiments/file_level_model.pt")
+    save_basename = os.path.basename(save_path_cfg)
+    save_path = os.path.join(run_dir, save_basename)
     trainer = CPDPTrainer(model=model, optimizer=optimizer, cfg=cfg, device=device, save_path=save_path)
 
-    trainer.train(source_loader=train_loader, target_loader=target_loader, valid_loader=valid_loader)
+    train_start = time.time()
+    state = trainer.train(source_loader=train_loader, target_loader=target_loader, valid_loader=valid_loader)
+    train_end = time.time()
 
     test_metrics = evaluate(model, test_loader, cfg, device)
     logging.info("Test metrics: %s", test_metrics)
+    model.eval()
+    all_probs = []
+    all_labels = []
+    all_logits = []
+    all_prob0 = []
+    all_unit_ids = []
+    all_projects = []
+    all_domains = []
+    all_locs = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+            logits = outputs["logits"]
+            probs = torch.softmax(logits, dim=1)
+            prob1 = probs[:, 1]
+            prob0 = probs[:, 0]
+            all_probs.append(prob1.detach().cpu().numpy())
+            all_prob0.append(prob0.detach().cpu().numpy())
+            all_logits.append(logits[:, 1].detach().cpu().numpy())
+            label_key = cfg.get("data", {}).get("label_key", "target")
+            if label_key in batch:
+                all_labels.append(batch[label_key].detach().cpu().numpy())
+            all_unit_ids.extend(batch.get("unit_id", [None] * len(prob1)))
+            all_projects.extend(batch.get("project", [None] * len(prob1)))
+            if "domain_labels" in batch:
+                all_domains.extend(batch["domain_labels"].detach().cpu().numpy().tolist())
+            else:
+                all_domains.extend([None] * len(prob1))
+            if "loc" in batch:
+                all_locs.extend(batch["loc"].detach().cpu().numpy().tolist())
+            else:
+                all_locs.extend([1.0] * len(prob1))
 
-    results_csv = cfg.get("logging", {}).get("results_csv", "experiments/d4j_file_results.csv")
-    _save_metrics_csv(results_csv, test_metrics)
+    if all_probs and all_labels:
+        probs_np = np.concatenate(all_probs, axis=0)
+        labels_np = np.concatenate(all_labels, axis=0)
+        logits_np = np.concatenate(all_logits, axis=0)
+        prob0_np = np.concatenate(all_prob0, axis=0)
+        best_threshold = float(test_metrics.get("best_threshold", 0.5))
+        rows = []
+        for idx, (label, prob1, prob0, logit) in enumerate(
+            zip(labels_np, probs_np, prob0_np, logits_np)
+        ):
+            row = {
+                "idx": all_unit_ids[idx],
+                "label": int(label),
+                "prob": float(prob1),
+                "prob0": float(prob0),
+                "logit": float(logit),
+                "pred_0p5": int(prob1 >= 0.5),
+                "pred_best": int(prob1 >= best_threshold),
+                "domain": all_domains[idx],
+                "project": all_projects[idx],
+                "split": "test",
+                "loc": float(all_locs[idx]),
+            }
+            rows.append(row)
+        _save_score_artifacts(run_dir, rows, probs_np, labels_np, logits_np)
+
+        git_sha = None
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+            ).decode("utf-8").strip()
+        except (OSError, subprocess.CalledProcessError):
+            git_sha = None
+        metadata = {
+            "run_name": exp_cfg.get("run_name"),
+            "seed": exp_cfg.get("seed"),
+            "best_threshold": best_threshold,
+            "output_dir": run_dir,
+            "git_sha": git_sha,
+        }
+        _write_metadata(run_dir, metadata)
+
+    epoch_metrics_csv = os.path.join(run_dir, "epoch_metrics.csv")
+    _save_epoch_metrics_csv(epoch_metrics_csv, state.history)
+
+    results_csv_name = os.path.basename(cfg.get("logging", {}).get("results_csv", "final_metrics.csv"))
+    results_csv = os.path.join(run_dir, results_csv_name)
+    run_end = time.time()
+    final_metrics = dict(test_metrics)
+    final_metrics.update(
+        {
+            "best_f1": float(state.best_f1),
+            "best_mcc": float(state.best_mcc),
+            "train_duration_sec": float(train_end - train_start),
+            "total_run_duration_sec": float(run_end - train_start),
+        }
+    )
+    _save_metrics_csv(results_csv, final_metrics)
 
 
 if __name__ == "__main__":

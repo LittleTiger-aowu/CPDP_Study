@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import random
+import subprocess
 from collections import Counter
 from typing import Dict, Any, List, Tuple
 
@@ -185,6 +186,65 @@ def _load_tokenizer(model_name: str) -> AutoTokenizer:
         logging.warning("Local tokenizer load failed: %s", exc)
         logging.info("Falling back to online tokenizer load: %s", model_name)
         return AutoTokenizer.from_pretrained(model_name, local_files_only=False)
+
+
+def _summarize_scores(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    logits: np.ndarray,
+) -> Dict[str, float]:
+    probs = probs.astype(float)
+    labels = labels.astype(int)
+    logits = logits.astype(float)
+    pos_mask = labels == 1
+    neg_mask = labels == 0
+    return {
+        "prob_mean": float(np.mean(probs)) if probs.size > 0 else float("nan"),
+        "prob_std": float(np.std(probs)) if probs.size > 0 else float("nan"),
+        "prob_p50": float(np.percentile(probs, 50)) if probs.size > 0 else float("nan"),
+        "prob_p90": float(np.percentile(probs, 90)) if probs.size > 0 else float("nan"),
+        "prob_p99": float(np.percentile(probs, 99)) if probs.size > 0 else float("nan"),
+        "prob_pos_mean": float(np.mean(probs[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "prob_neg_mean": float(np.mean(probs[neg_mask])) if np.any(neg_mask) else float("nan"),
+        "logit_mean": float(np.mean(logits)) if logits.size > 0 else float("nan"),
+        "logit_std": float(np.std(logits)) if logits.size > 0 else float("nan"),
+        "logit_p50": float(np.percentile(logits, 50)) if logits.size > 0 else float("nan"),
+        "logit_p90": float(np.percentile(logits, 90)) if logits.size > 0 else float("nan"),
+        "logit_p99": float(np.percentile(logits, 99)) if logits.size > 0 else float("nan"),
+        "logit_pos_mean": float(np.mean(logits[pos_mask])) if np.any(pos_mask) else float("nan"),
+        "logit_neg_mean": float(np.mean(logits[neg_mask])) if np.any(neg_mask) else float("nan"),
+    }
+
+
+def _save_score_artifacts(
+    output_dir: str,
+    rows: List[Dict[str, object]],
+    probs: np.ndarray,
+    labels: np.ndarray,
+    logits: np.ndarray,
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    scores_path = os.path.join(output_dir, "test_scores.csv")
+    if rows:
+        fieldnames = list(rows[0].keys())
+        with open(scores_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    stats = _summarize_scores(probs, labels, logits)
+    stats_path = os.path.join(output_dir, "test_score_stats.csv")
+    with open(stats_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        for key, value in stats.items():
+            writer.writerow([key, value])
+
+
+def _write_metadata(output_dir: str, payload: Dict[str, object]) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "metadata.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def main() -> None:
@@ -443,6 +503,86 @@ def main() -> None:
     test_metrics = trainer.evaluate(test_loader)
     logging.info("Final Test Metrics: %s", test_metrics)
 
+    model.eval()
+    all_probs = []
+    all_labels = []
+    all_logits = []
+    all_prob0 = []
+    all_unit_ids = []
+    all_projects = []
+    all_domains = []
+    all_locs = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            outputs = model(batch, cfg, epoch_idx=0, grl_lambda=0.0)
+            logits = outputs["logits"]
+            probs = torch.softmax(logits, dim=1)
+            prob1 = probs[:, 1]
+            prob0 = probs[:, 0]
+            all_probs.append(prob1.detach().cpu().numpy())
+            all_prob0.append(prob0.detach().cpu().numpy())
+            all_logits.append(logits[:, 1].detach().cpu().numpy())
+            label_key = cfg.get("data", {}).get("label_key", "target")
+            if label_key in batch:
+                all_labels.append(batch[label_key].detach().cpu().numpy())
+            all_unit_ids.extend(batch.get("unit_id", [None] * len(prob1)))
+            all_projects.extend(batch.get("project", [None] * len(prob1)))
+            domain_key = cfg.get("data", {}).get("domain_key", "domain")
+            if domain_key in batch:
+                all_domains.extend(batch[domain_key].detach().cpu().numpy().tolist())
+            else:
+                all_domains.extend([None] * len(prob1))
+            if "loc" in batch:
+                all_locs.extend(batch["loc"].detach().cpu().numpy().tolist())
+            else:
+                all_locs.extend([1.0] * len(prob1))
+
+    score_rows = None
+    if all_probs and all_labels:
+        probs_np = np.concatenate(all_probs, axis=0)
+        labels_np = np.concatenate(all_labels, axis=0)
+        logits_np = np.concatenate(all_logits, axis=0)
+        prob0_np = np.concatenate(all_prob0, axis=0)
+        best_threshold = float(test_metrics.get("best_threshold", 0.5))
+        rows = []
+        for idx, (label, prob1, prob0, logit) in enumerate(
+            zip(labels_np, probs_np, prob0_np, logits_np)
+        ):
+            row = {
+                "idx": all_unit_ids[idx],
+                "label": int(label),
+                "prob": float(prob1),
+                "prob0": float(prob0),
+                "logit": float(logit),
+                "pred_0p5": int(prob1 >= 0.5),
+                "pred_best": int(prob1 >= best_threshold),
+                "domain": all_domains[idx],
+                "project": all_projects[idx],
+                "split": "test",
+                "loc": float(all_locs[idx]),
+            }
+            rows.append(row)
+        _save_score_artifacts(output_dir, rows, probs_np, labels_np, logits_np)
+        score_rows = rows
+
+        git_sha = None
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            ).decode("utf-8").strip()
+        except (OSError, subprocess.CalledProcessError):
+            git_sha = None
+        metadata = {
+            "run_name": exp_cfg.get("run_name"),
+            "seed": seed,
+            "best_threshold": best_threshold,
+            "output_dir": output_dir,
+            "git_sha": git_sha,
+        }
+        _write_metadata(output_dir, metadata)
+
     exp_cfg = cfg.get("experiment", {})
     exp_name = exp_cfg.get("run_name") or os.path.splitext(os.path.basename(args.config))[0]
     project_name = exp_cfg.get("project") or os.path.basename(os.path.abspath(args.project_dir))
@@ -490,18 +630,25 @@ def main() -> None:
 
         if log_cfg.get("save_predictions", False):
             pred_path = os.path.join(output_dir, "test_predictions.csv")
-            probs_np = np.concatenate(all_probs, axis=0)
-            labels_np = np.concatenate(all_labels, axis=0) if all_labels else None
-            with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
-                writer = csv.writer(pred_file)
-                if labels_np is None:
-                    writer.writerow(["prob"])
-                    for prob in probs_np:
-                        writer.writerow([float(prob)])
-                else:
-                    writer.writerow(["label", "prob"])
-                    for label, prob in zip(labels_np, probs_np):
-                        writer.writerow([int(label), float(prob)])
+            if score_rows:
+                fieldnames = list(score_rows[0].keys())
+                with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
+                    writer = csv.DictWriter(pred_file, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(score_rows)
+            else:
+                probs_np = np.concatenate(all_probs, axis=0)
+                labels_np = np.concatenate(all_labels, axis=0) if all_labels else None
+                with open(pred_path, "w", encoding="utf-8", newline="") as pred_file:
+                    writer = csv.writer(pred_file)
+                    if labels_np is None:
+                        writer.writerow(["prob"])
+                        for prob in probs_np:
+                            writer.writerow([float(prob)])
+                    else:
+                        writer.writerow(["label", "prob"])
+                        for label, prob in zip(labels_np, probs_np):
+                            writer.writerow([int(label), float(prob)])
             logging.info("Saved predictions to %s", pred_path)
 
         if log_cfg.get("save_embeddings", False) and all_embeddings:

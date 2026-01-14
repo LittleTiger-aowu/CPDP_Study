@@ -94,12 +94,15 @@ class FileJsonlDataset(Dataset):
         code = self._get_code_text(item)
         label = int(item.get(self.label_key, 0))
         domain_value = self._get_domain_value(item)
+        loc = max(1, len([line for line in code.splitlines() if line.strip()]))
 
         sample = {
             "code": code,
             "label": label,
             "domain": domain_value,
             "unit_id": item.get("unit_id"),
+            "loc": loc,
+            "project": item.get("project"),
         }
         if "methods" in item:
             sample["methods"] = item["methods"]

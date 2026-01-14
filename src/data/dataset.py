@@ -242,6 +242,7 @@ class CPDPDataset(Dataset):
         # 1. 文本处理 (Head+Tail Tokenization)
         # -------------------------
         code_text = self._get_code_text(item)
+        loc = max(1, len([line for line in code_text.splitlines() if line.strip()]))
         # Tokenizer 调用: 不做 batch padding (padding=False)，由 collate 负责
         # 这里不启用 truncation，手动做 Head+Tail 截断
         encoding = self.tokenizer(
@@ -275,7 +276,10 @@ class CPDPDataset(Dataset):
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             # 标签数据 (默认处理为标量，collate 会 stack)
             self.label_key: int(item.get(self.label_key, 0)),
-            self.domain_key: self._get_domain_value(item)
+            self.domain_key: self._get_domain_value(item),
+            "loc": loc,
+            "unit_id": item.get("idx", item.get("unit_id")),
+            "project": item.get("project"),
         }
 
         # 兼容 RoBERTa (没有 token_type_ids) 和 BERT (有)

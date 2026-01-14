@@ -33,6 +33,9 @@ class FileLevelCollator:
         labels = []
         domain_labels = []
         methods = []
+        locs = []
+        unit_ids = []
+        projects = []
 
         for sample in samples:
             code = sample.get("code", "")
@@ -49,6 +52,9 @@ class FileLevelCollator:
 
             labels.append(int(sample.get(self.cfg.label_key, 0)))
             domain_labels.append(int(sample.get(self.cfg.domain_key, 0)))
+            locs.append(int(sample.get("loc", 1)))
+            unit_ids.append(sample.get("unit_id"))
+            projects.append(sample.get("project"))
             if "methods" in sample:
                 methods.append(sample["methods"])
 
@@ -58,6 +64,9 @@ class FileLevelCollator:
             "win_mask": torch.stack(win_masks, dim=0),
             self.cfg.label_key: torch.tensor(labels, dtype=torch.long),
             "domain_labels": torch.tensor(domain_labels, dtype=torch.long),
+            "loc": torch.tensor(locs, dtype=torch.float32),
+            "unit_id": unit_ids,
+            "project": projects,
         }
         if methods:
             batch["methods"] = methods
