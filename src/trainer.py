@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple, Iterator
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Tuple, Iterator, List
+import time
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -17,6 +19,7 @@ from src.losses.orthogonal import orthogonal_loss
 class TrainState:
     best_f1: float = 0.0
     best_mcc: float = 0.0
+    history: List[Dict[str, float]] = field(default_factory=list)
 
 
 def compute_grl_lambda(epoch_idx: int, cfg: Dict) -> float:
@@ -194,27 +197,29 @@ def train_one_epoch(
     return total_loss / max(1, num_steps)
 
 
-def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]:
+def _binary_metrics(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    effort: np.ndarray | None = None,
+    effort_budget: float = 0.2,
+) -> Dict[str, float]:
     """
-    自动在验证集概率上搜索最佳 F1 阈值，并返回对应指标。
+    自动在验证集概率上搜索最佳 MCC 阈值，并返回对应指标。
     """
-    from sklearn.metrics import roc_auc_score
+    from sklearn.metrics import average_precision_score, roc_auc_score
 
     # 1. 预计算 AUC (AUC 与阈值无关，算一次即可)
     num_pos = np.sum(y_true == 1)
     num_neg = np.sum(y_true == 0)
     if num_pos == 0 or num_neg == 0:
-        auc = 0.0
+        auc = float("nan")
+        pr_auc = float("nan")
     else:
-        # 使用 argsort 计算 AUC
-        order = np.argsort(y_score)
-        ranks = np.empty_like(order)
-        ranks[order] = np.arange(len(y_score)) + 1
-        sum_ranks = np.sum(ranks[y_true == 1])
-        auc = (sum_ranks - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
+        auc = float(roc_auc_score(y_true, y_score))
+        pr_auc = float(average_precision_score(y_true, y_score))
 
-    # 2. 动态搜索最佳阈值 (0.01 到 0.60，步长 0.01)
-    best_f1 = -1.0
+    # 2. 动态搜索最佳 MCC 阈值 (0.01 到 0.60，步长 0.01)
+    best_mcc = float("-inf")
     best_metrics = {}
 
     # 跨项目场景下，由于分布偏移，最佳阈值通常偏低 (0.01-0.4 之间)
@@ -230,27 +235,61 @@ def _binary_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]
         precision = tp / (tp + fp + 1e-12)
         recall = tp / (tp + fn + 1e-12)
         f1 = 2 * precision * recall / (precision + recall + 1e-12)
+        tpr = recall
+        tnr = tn / (tn + fp + 1e-12)
+        balanced_acc = (tpr + tnr) / 2
+        g_mean = float(np.sqrt(tpr * tnr))
+        term1 = np.float64(tp + fp)
+        term2 = np.float64(tp + fn)
+        term3 = np.float64(tn + fp)
+        term4 = np.float64(tn + fn)
+        mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
+        mcc = ((tp * tn) - (fp * fn)) / mcc_denom
 
-        if f1 > best_f1:
-            best_f1 = f1
-            # 计算当前最佳 F1 下的 MCC
-            term1 = np.float64(tp + fp)
-            term2 = np.float64(tp + fn)
-            term3 = np.float64(tn + fp)
-            term4 = np.float64(tn + fn)
-            mcc_denom = np.sqrt(term1 * term2 * term3 * term4 + 1e-12)
-            mcc = ((tp * tn) - (fp * fn)) / mcc_denom
-
+        if mcc > best_mcc:
+            best_mcc = float(mcc)
             best_metrics = {
                 "f1": float(f1),
                 "mcc": float(mcc),
                 "auc": float(auc),
+                "pr_auc": float(pr_auc),
                 "precision": float(precision),
                 "recall": float(recall),
+                "balanced_acc": float(balanced_acc),
+                "g_mean": float(g_mean),
                 "accuracy": float((tp + tn) / (len(y_true) + 1e-12)),
                 "pf": float(fp / (fp + tn + 1e-12)),
-                "best_threshold": float(th)  # 记录是在哪个阈值下拿到的
+                "best_threshold": float(th),
             }
+
+    if effort is not None and len(effort) == len(y_true):
+        total_effort = float(np.sum(effort))
+        num_defects = float(np.sum(y_true == 1))
+        if total_effort <= 0:
+            recall_at_effort = float("nan")
+            precision_at_effort = float("nan")
+        else:
+            order = np.argsort(-y_score)
+            sorted_effort = effort[order]
+            sorted_labels = y_true[order]
+            budget = effort_budget * total_effort
+            cumulative_effort = np.cumsum(sorted_effort)
+            cutoff_idx = int(np.searchsorted(cumulative_effort, budget, side="left"))
+            if cutoff_idx >= len(sorted_effort):
+                cutoff_idx = len(sorted_effort) - 1
+            selected = sorted_labels[: cutoff_idx + 1]
+            selected_defects = float(np.sum(selected == 1))
+            if num_defects <= 0:
+                recall_at_effort = float("nan")
+            else:
+                recall_at_effort = selected_defects / (num_defects + 1e-12)
+            precision_at_effort = selected_defects / max(1.0, float(len(selected)))
+        best_metrics.update(
+            {
+                "recall_at_20_effort": float(recall_at_effort),
+                "precision_at_20_effort": float(precision_at_effort),
+            }
+        )
 
     return best_metrics
 
@@ -267,6 +306,7 @@ def evaluate(
 
     all_labels = []
     all_scores = []
+    all_effort = []
 
     # 你也可以在这里加一个 tqdm，不过验证集通常跑得快，不加也行
     for batch in loader:
@@ -276,10 +316,15 @@ def evaluate(
         probs = torch.softmax(logits, dim=1)[:, 1]
         all_scores.append(probs.detach().cpu().numpy())
         all_labels.append(batch[label_key].detach().cpu().numpy())
+        if "loc" in batch:
+            all_effort.append(batch["loc"].detach().cpu().numpy())
+        else:
+            all_effort.append(np.ones_like(all_labels[-1], dtype=np.float32))
 
     y_true = np.concatenate(all_labels, axis=0)
     y_score = np.concatenate(all_scores, axis=0)
-    return _binary_metrics(y_true, y_score)
+    y_effort = np.concatenate(all_effort, axis=0)
+    return _binary_metrics(y_true, y_score, effort=y_effort)
 
 
 def train(
@@ -301,11 +346,14 @@ def train(
     early_metric = str(early_cfg.get("metric", "auc")).lower()
     save_best = bool(cfg.get("experiment", {}).get("save_best", True))
     state = TrainState()
+    history: List[Dict[str, float]] = []
     best_metric = float("-inf")
     patience_counter = 0
 
     for epoch in range(epochs):
-        train_one_epoch(
+        epoch_start = time.time()
+        epoch_start_ts = datetime.now().isoformat(timespec="seconds")
+        train_loss = train_one_epoch(
             model=model,
             source_loader=source_loader,
             target_loader=target_loader,
@@ -314,8 +362,22 @@ def train(
             device=device,
             epoch_idx=epoch,
         )
+        epoch_end_ts = datetime.now().isoformat(timespec="seconds")
+        epoch_time = time.time() - epoch_start
+        lr = float(optimizer.param_groups[0].get("lr", 0.0)) if optimizer.param_groups else 0.0
+        grl_lambda = compute_grl_lambda(epoch, cfg)
+        record = {
+            "epoch": epoch + 1,
+            "epoch_start_time": epoch_start_ts,
+            "epoch_end_time": epoch_end_ts,
+            "train_loss": float(train_loss),
+            "epoch_time_sec": float(epoch_time),
+            "grl_lambda": float(grl_lambda),
+            "lr": float(lr),
+        }
 
         if eval_every > 0 and (epoch + 1) % eval_every != 0:
+            history.append(record)
             continue
 
         metrics = evaluate(model, valid_loader, cfg, device)
@@ -341,10 +403,32 @@ def train(
 
         if improved and not save_best:
             torch.save(model.state_dict(), save_path)
+        record.update(
+            {
+                "val_f1": float(metrics.get("f1", 0.0)),
+                "val_mcc": float(metrics.get("mcc", 0.0)),
+                "val_auc": float(metrics.get("auc", 0.0)),
+                "val_pr_auc": float(metrics.get("pr_auc", 0.0)),
+                "val_precision": float(metrics.get("precision", 0.0)),
+                "val_recall": float(metrics.get("recall", 0.0)),
+                "val_balanced_acc": float(metrics.get("balanced_acc", 0.0)),
+                "val_g_mean": float(metrics.get("g_mean", 0.0)),
+                "val_accuracy": float(metrics.get("accuracy", 0.0)),
+                "val_pf": float(metrics.get("pf", 0.0)),
+                "val_best_threshold": float(metrics.get("best_threshold", 0.0)),
+                "val_recall_at_20_effort": float(metrics.get("recall_at_20_effort", 0.0)),
+                "val_precision_at_20_effort": float(metrics.get("precision_at_20_effort", 0.0)),
+                "best_f1_so_far": float(state.best_f1),
+                "best_mcc_so_far": float(state.best_mcc),
+            }
+        )
+        history.append(record)
+
         if early_enable and early_patience > 0 and patience_counter >= early_patience:
             logging.info("Early stopping triggered at epoch %d.", epoch + 1)
             break
 
+    state.history = history
     return state
 
 
